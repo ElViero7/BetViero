@@ -120,9 +120,9 @@ class SupabaseRestClient:
 
 def get_supabase_client() -> SupabaseRestClient:
     supabase_url = os.getenv("SUPABASE_URL", "").strip()
-    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip() or os.getenv("SUPABASE_KEY", "").strip()
     if not supabase_url or not supabase_key:
-        raise TennisEVCalculatorError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in environment.")
+        raise TennisEVCalculatorError("Missing SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY/SUPABASE_KEY in environment.")
     return SupabaseRestClient(supabase_url, supabase_key)
 
 
