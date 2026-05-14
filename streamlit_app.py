@@ -1255,7 +1255,43 @@ def render_lol_dashboard() -> None:
     st.write("- Para movil y escritorio, una web es mejor que una APK ahora mismo. Si luego quieres, se puede empaquetar como PWA o wrapper.")
 
 
+def check_password() -> bool:
+    def get_expected_password() -> str | None:
+        try:
+            return st.secrets["APP_PASSWORD"]
+        except Exception:
+            return None
+
+    def password_entered() -> None:
+        expected_password = get_expected_password()
+        if not expected_password:
+            st.session_state["password_correct"] = False
+            return
+
+        if st.session_state.get("app_password") == expected_password:
+            st.session_state["password_correct"] = True
+            del st.session_state["app_password"]
+        else:
+            st.session_state["password_correct"] = False
+
+    if st.session_state.get("password_correct"):
+        return True
+
+    st.text_input("Password", type="password", on_change=password_entered, key="app_password")
+
+    if "password_correct" in st.session_state:
+        if not get_expected_password():
+            st.error("Falta configurar APP_PASSWORD en Streamlit secrets.")
+        else:
+            st.error("Password incorrecto.")
+
+    return False
+
+
 def main() -> None:
+    if not check_password():
+        return
+
     sport = st.sidebar.selectbox(
         "Deporte",
         ["League of Legends", "Tenis"],
