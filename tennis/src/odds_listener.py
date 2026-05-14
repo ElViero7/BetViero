@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,7 @@ class TennisOddsListenerError(RuntimeError):
 
 
 def get_mock_odds() -> list[dict[str, Any]]:
-    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return [
         {
             "id": "mock_alcaraz_sinner",
