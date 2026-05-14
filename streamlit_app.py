@@ -82,6 +82,19 @@ if "force_register_page" not in st.session_state:
 TENNIS_VALUE_BETS_PATH = TENNIS_DIR / "data" / "predictions" / "upcoming_value_bets_tennis.csv"
 TENNIS_SACKMANN_PATH = TENNIS_DIR / "data" / "processed" / "sackmann_atp_clean.csv"
 TENNIS_FEATURES_PATH = TENNIS_DIR / "data" / "processed" / "atp_features_avanzadas.csv"
+TENNIS_SECRET_KEYS = [
+    "ODDS_API_KEY",
+    "THE_ODDS_API_KEY",
+    "SUPABASE_URL",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "SUPABASE_KEY",
+    "THE_ODDS_API_BASE_URL",
+    "THE_ODDS_API_TIMEOUT_SECONDS",
+    "TENNIS_ODDS_SPORT_KEY",
+    "TENNIS_ODDS_REGIONS",
+    "TENNIS_ODDS_MARKETS",
+    "TENNIS_ODDS_FORMAT",
+]
 
 
 @st.cache_data(ttl=60)
@@ -892,11 +905,29 @@ def render_register_page(bot_config: BotConfig, predictions_frame: pd.DataFrame,
                 st.error(str(exc))
 
 
+def get_streamlit_secret(key: str) -> str | None:
+    try:
+        value = st.secrets[key]
+    except Exception:
+        return None
+    return str(value) if value is not None else None
+
+
+def build_tennis_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for key in TENNIS_SECRET_KEYS:
+        secret_value = get_streamlit_secret(key)
+        if secret_value:
+            env[key] = secret_value
+    return env
+
+
 def run_tennis_script(script_name: str, *args: str, timeout_seconds: int = 300) -> subprocess.CompletedProcess[str]:
     script_path = TENNIS_DIR / "src" / script_name
     return subprocess.run(
         [sys.executable, str(script_path), *args],
         cwd=PROJECT_ROOT,
+        env=build_tennis_subprocess_env(),
         capture_output=True,
         text=True,
         timeout=timeout_seconds,
@@ -932,6 +963,56 @@ def add_tennis_kelly_column(frame: pd.DataFrame, bankroll: float = 1000.0) -> pd
     return output
 
 
+def tennis_file_status(path: Path) -> dict[str, object]:
+    status: dict[str, object] = {
+        "archivo": str(path.relative_to(PROJECT_ROOT)),
+        "existe": path.exists(),
+        "bytes": path.stat().st_size if path.exists() else 0,
+    }
+    if path.exists() and path.suffix.lower() == ".csv":
+        try:
+            status["filas"] = len(pd.read_csv(path))
+        except Exception as exc:
+            status["filas"] = f"Error leyendo CSV: {exc}"
+    return status
+
+
+def render_tennis_diagnostics() -> None:
+    with st.expander("Diagnostico Tenis"):
+        secret_status = {
+            key: ("configurado" if get_streamlit_secret(key) or os.getenv(key) else "faltante")
+            for key in ["ODDS_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_KEY"]
+        }
+        st.write("Secrets / entorno")
+        st.json(secret_status)
+
+        st.write("Archivos")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    tennis_file_status(TENNIS_FEATURES_PATH),
+                    tennis_file_status(TENNIS_VALUE_BETS_PATH),
+                    tennis_file_status(TENNIS_SACKMANN_PATH),
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        result = st.session_state.get("last_tennis_script_result")
+        if not result:
+            st.info("Todavia no se ha ejecutado ningun script en esta sesion.")
+            return
+
+        st.write(f"Ultimo script: `{result['script']}` | returncode: `{result['returncode']}`")
+        if result.get("stdout"):
+            st.write("stdout")
+            st.code(result["stdout"])
+        if result.get("stderr"):
+            st.write("stderr")
+            st.code(result["stderr"])
+
+
 @st.cache_data(ttl=30)
 def load_tennis_picks_history() -> pd.DataFrame:
     response = (
@@ -954,6 +1035,12 @@ def render_tennis_live_hunter() -> None:
     if download_sackmann:
         with st.spinner("Descargando y limpiando Sackmann..."):
             result = run_tennis_script("data_fetcher.py", timeout_seconds=300)
+        st.session_state["last_tennis_script_result"] = {
+            "script": "data_fetcher.py",
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
         if result.returncode == 0:
             load_tennis_csv.clear()
             st.success(result.stdout.strip() or "Datos de Sackmann actualizados.")
@@ -963,6 +1050,12 @@ def render_tennis_live_hunter() -> None:
     if process_features:
         with st.spinner("Procesando features avanzadas sin leakage..."):
             result = run_tennis_script("data_prep.py", timeout_seconds=300)
+        st.session_state["last_tennis_script_result"] = {
+            "script": "data_prep.py",
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
         if result.returncode == 0:
             load_tennis_csv.clear()
             st.success(result.stdout.strip() or "Features avanzadas actualizadas.")
@@ -975,6 +1068,12 @@ def render_tennis_live_hunter() -> None:
         else:
             with st.spinner("Cazando cuotas y calculando EV con Monte Carlo..."):
                 result = run_tennis_script("ev_calculator.py", timeout_seconds=300)
+            st.session_state["last_tennis_script_result"] = {
+                "script": "ev_calculator.py",
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            }
             if result.returncode == 0:
                 load_tennis_csv.clear()
                 load_tennis_picks_history.clear()
@@ -991,6 +1090,8 @@ def render_tennis_live_hunter() -> None:
     metric_2.metric("Features avanzadas", len(features_frame))
     metric_3.metric("Value rows", len(value_bets))
     metric_4.metric("EV > 0", int((pd.to_numeric(value_bets.get("EV", pd.Series(dtype=float)), errors="coerce") > 0).sum()))
+
+    render_tennis_diagnostics()
 
     st.subheader("Value Bets Tenis")
     if value_bets.empty:
