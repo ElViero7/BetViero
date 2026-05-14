@@ -1,0 +1,23 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+tennis/data/predictions/*.csv
+tennis/data/*_log.csv
+tennis/data/**/*.csv
+.DS_Store
+
+# Local/runtime artifacts
+*.log
+.streamlit/secrets.toml
+cuotas_lol_test.json
+
+# Generated Python caches in nested packages
+**/__pycache__/
+
+# Model artifacts and generated datasets
+*.pkl
+*.joblib
+*.parquet

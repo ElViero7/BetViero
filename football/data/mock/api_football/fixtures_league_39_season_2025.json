@@ -1,0 +1,143 @@
+{
+  "get": "fixtures",
+  "parameters": {
+    "league": "39",
+    "season": "2025"
+  },
+  "errors": [],
+  "results": 8,
+  "paging": {
+    "current": 1,
+    "total": 1
+  },
+  "response": [
+    {
+      "fixture": {
+        "id": 1001,
+        "referee": "Mock Ref 1",
+        "timezone": "UTC",
+        "date": "2026-04-01T19:00:00+00:00",
+        "timestamp": 1775070000,
+        "periods": { "first": 1775070000, "second": 1775073600 },
+        "venue": { "id": 11, "name": "Emirates Stadium", "city": "London" },
+        "status": { "long": "Match Finished", "short": "FT", "elapsed": 90 }
+      },
+      "league": { "id": 39, "name": "Premier League", "country": "England", "logo": "", "flag": "", "season": 2025, "round": "Regular Season - 31" },
+      "teams": { "home": { "id": 1, "name": "Arsenal", "logo": "", "winner": true }, "away": { "id": 2, "name": "Chelsea", "logo": "", "winner": false } },
+      "goals": { "home": 2, "away": 1 },
+      "score": { "halftime": { "home": 1, "away": 0 }, "fulltime": { "home": 2, "away": 1 }, "extratime": { "home": null, "away": null }, "penalty": { "home": null, "away": null } }
+    },
+    {
+      "fixture": {
+        "id": 1002,
+        "referee": "Mock Ref 2",
+        "timezone": "UTC",
+        "date": "2026-04-05T16:30:00+00:00",
+        "timestamp": 1775406600,
+        "periods": { "first": 1775406600, "second": 1775410200 },
+        "venue": { "id": 12, "name": "Anfield", "city": "Liverpool" },
+        "status": { "long": "Match Finished", "short": "FT", "elapsed": 90 }
+      },
+      "league": { "id": 39, "name": "Premier League", "country": "England", "logo": "", "flag": "", "season": 2025, "round": "Regular Season - 31" },
+      "teams": { "home": { "id": 3, "name": "Liverpool", "logo": "", "winner": false }, "away": { "id": 4, "name": "Manchester City", "logo": "", "winner": true } },
+      "goals": { "home": 1, "away": 2 },
+      "score": { "halftime": { "home": 0, "away": 1 }, "fulltime": { "home": 1, "away": 2 }, "extratime": { "home": null, "away": null }, "penalty": { "home": null, "away": null } }
+    },
+    {
+      "fixture": {
+        "id": 1003,
+        "referee": "Mock Ref 3",
+        "timezone": "UTC",
+        "date": "2026-04-09T19:00:00+00:00",
+        "timestamp": 1775751600,
+        "periods": { "first": 1775751600, "second": 1775755200 },
+        "venue": { "id": 13, "name": "Stamford Bridge", "city": "London" },
+        "status": { "long": "Match Finished", "short": "FT", "elapsed": 90 }
+      },
+      "league": { "id": 39, "name": "Premier League", "country": "England", "logo": "", "flag": "", "season": 2025, "round": "Regular Season - 32" },
+      "teams": { "home": { "id": 2, "name": "Chelsea", "logo": "", "winner": false }, "away": { "id": 3, "name": "Liverpool", "logo": "", "winner": true } },
+      "goals": { "home": 0, "away": 2 },
+      "score": { "halftime": { "home": 0, "away": 1 }, "fulltime": { "home": 0, "away": 2 }, "extratime": { "home": null, "away": null }, "penalty": { "home": null, "away": null } }
+    },
+    {
+      "fixture": {
+        "id": 1004,
+        "referee": "Mock Ref 4",
+        "timezone": "UTC",
+        "date": "2026-04-12T15:00:00+00:00",
+        "timestamp": 1776006000,
+        "periods": { "first": 1776006000, "second": 1776009600 },
+        "venue": { "id": 14, "name": "Etihad Stadium", "city": "Manchester" },
+        "status": { "long": "Match Finished", "short": "FT", "elapsed": 90 }
+      },
+      "league": { "id": 39, "name": "Premier League", "country": "England", "logo": "", "flag": "", "season": 2025, "round": "Regular Season - 32" },
+      "teams": { "home": { "id": 4, "name": "Manchester City", "logo": "", "winner": true }, "away": { "id": 1, "name": "Arsenal", "logo": "", "winner": false } },
+      "goals": { "home": 3, "away": 1 },
+      "score": { "halftime": { "home": 1, "away": 1 }, "fulltime": { "home": 3, "away": 1 }, "extratime": { "home": null, "away": null }, "penalty": { "home": null, "away": null } }
+    },
+    {
+      "fixture": {
+        "id": 1005,
+        "referee": "Mock Ref 5",
+        "timezone": "UTC",
+        "date": "2026-04-18T14:00:00+00:00",
+        "timestamp": 1776520800,
+        "periods": { "first": 1776520800, "second": 1776524400 },
+        "venue": { "id": 15, "name": "Emirates Stadium", "city": "London" },
+        "status": { "long": "Match Finished", "short": "FT", "elapsed": 90 }
+      },
+      "league": { "id": 39, "name": "Premier League", "country": "England", "logo": "", "flag": "", "season": 2025, "round": "Regular Season - 33" },
+      "teams": { "home": { "id": 1, "name": "Arsenal", "logo": "", "winner": true }, "away": { "id": 3, "name": "Liverpool", "logo": "", "winner": false } },
+      "goals": { "home": 2, "away": 0 },
+      "score": { "halftime": { "home": 1, "away": 0 }, "fulltime": { "home": 2, "away": 0 }, "extratime": { "home": null, "away": null }, "penalty": { "home": null, "away": null } }
+    },
+    {
+      "fixture": {
+        "id": 1006,
+        "referee": "Mock Ref 6",
+        "timezone": "UTC",
+        "date": "2026-04-21T19:00:00+00:00",
+        "timestamp": 1776798000,
+        "periods": { "first": 1776798000, "second": 1776801600 },
+        "venue": { "id": 16, "name": "Stamford Bridge", "city": "London" },
+        "status": { "long": "Match Finished", "short": "FT", "elapsed": 90 }
+      },
+      "league": { "id": 39, "name": "Premier League", "country": "England", "logo": "", "flag": "", "season": 2025, "round": "Regular Season - 33" },
+      "teams": { "home": { "id": 2, "name": "Chelsea", "logo": "", "winner": true }, "away": { "id": 4, "name": "Manchester City", "logo": "", "winner": false } },
+      "goals": { "home": 1, "away": 0 },
+      "score": { "halftime": { "home": 1, "away": 0 }, "fulltime": { "home": 1, "away": 0 }, "extratime": { "home": null, "away": null }, "penalty": { "home": null, "away": null } }
+    },
+    {
+      "fixture": {
+        "id": 1007,
+        "referee": "Mock Ref 7",
+        "timezone": "UTC",
+        "date": "2026-04-26T16:30:00+00:00",
+        "timestamp": 1777221000,
+        "periods": { "first": 1777221000, "second": 1777224600 },
+        "venue": { "id": 17, "name": "Anfield", "city": "Liverpool" },
+        "status": { "long": "Match Finished", "short": "FT", "elapsed": 90 }
+      },
+      "league": { "id": 39, "name": "Premier League", "country": "England", "logo": "", "flag": "", "season": 2025, "round": "Regular Season - 34" },
+      "teams": { "home": { "id": 3, "name": "Liverpool", "logo": "", "winner": true }, "away": { "id": 2, "name": "Chelsea", "logo": "", "winner": false } },
+      "goals": { "home": 3, "away": 1 },
+      "score": { "halftime": { "home": 2, "away": 0 }, "fulltime": { "home": 3, "away": 1 }, "extratime": { "home": null, "away": null }, "penalty": { "home": null, "away": null } }
+    },
+    {
+      "fixture": {
+        "id": 1008,
+        "referee": "Mock Ref 8",
+        "timezone": "UTC",
+        "date": "2026-05-01T19:00:00+00:00",
+        "timestamp": 1777652400,
+        "periods": { "first": 1777652400, "second": 1777656000 },
+        "venue": { "id": 18, "name": "Etihad Stadium", "city": "Manchester" },
+        "status": { "long": "Match Finished", "short": "FT", "elapsed": 90 }
+      },
+      "league": { "id": 39, "name": "Premier League", "country": "England", "logo": "", "flag": "", "season": 2025, "round": "Regular Season - 34" },
+      "teams": { "home": { "id": 4, "name": "Manchester City", "logo": "", "winner": false }, "away": { "id": 1, "name": "Arsenal", "logo": "", "winner": true } },
+      "goals": { "home": 1, "away": 2 },
+      "score": { "halftime": { "home": 1, "away": 1 }, "fulltime": { "home": 1, "away": 2 }, "extratime": { "home": null, "away": null }, "penalty": { "home": null, "away": null } }
+    }
+  ]
+}

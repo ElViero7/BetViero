@@ -1,0 +1,29 @@
+league,scheduled_at,team_a,team_b,book_team_a_odd,book_team_b_odd
+LCK,2026-05-13T08:00:00Z,T1,Nongshim RedForce,1.07,7.50
+LCK,2026-05-13T10:00:00Z,DN SOOPers,Dplus KIA,7.50,1.07
+LCK,2026-05-14T08:00:00Z,BNK FEARX,Gen.G,7.50,1.07
+LCK,2026-05-15T08:00:00Z,Nongshim RedForce,KT Rolster,4.80,1.17
+LCK,2026-05-15T10:00:00Z,Hanwha Life Esports,Dplus KIA,1.28,3.50
+LCK,2026-05-16T08:00:00Z,OKSavingsBank BRION,DN SOOPers,1.68,2.20
+LCK,2026-05-16T10:00:00Z,Gen.G,T1,1.52,2.40
+LCK,2026-05-17T08:00:00Z,BNK FEARX,KT Rolster,1.52,2.40
+LCK,2026-05-17T10:00:00Z,Hanwha Life Esports,KT Rolster,1.25,3.05
+LCK,2026-05-18T08:00:00Z,Nongshim RedForce,OKSavingsBank BRION,2.25,1.60
+LPL,2026-05-12T11:00:00Z,Top Esports,Ninjas in Pyjamas,1.38,2.90
+LPL,2026-05-12T13:00:00Z,Invictus Gaming,Bilibili Gaming,4.40,1.14
+LPL,2026-05-13T11:00:00Z,Oh My God,EDward Gaming,2.80,1.41
+LPL,2026-05-13T13:00:00Z,Team WE,Anyone's Legend,8.00,1.06
+LPL,2026-05-14T11:00:00Z,LGD Gaming,LNG Esports,2.50,1.50
+LPL,2026-05-14T13:00:00Z,Weibo Gaming,JD Gaming,2.30,1.56
+LPL,2026-05-15T11:00:00Z,Oh My God,Ultra Prime,1.44,2.15
+LPL,2026-05-15T13:00:00Z,Top Esports,EDward Gaming,2.40,1.47
+LPL,2026-05-16T11:00:00Z,EDward Gaming,ThunderTalk Gaming,1.84,2.15
+LPL,2026-05-16T13:00:00Z,Team WE,Ninjas in Pyjamas,2.80,1.41
+LPL,2026-05-17T11:00:00Z,JD Gaming,Invictus Gaming,1.37,2.95
+LPL,2026-05-17T13:00:00Z,Bilibili Gaming,Anyone's Legend,1.47,2.60
+LEC,2026-05-23T17:00:00Z,Team Vitality,Movistar KOI,2.15,1.62
+LEC,2026-05-24T17:00:00Z,Karmine Corp,G2 Esports,2.55,1.46
+LCS,2026-05-17T22:00:00Z,Team Liquid,Cloud9,2.10,1.68
+LCS,2026-05-18T01:00:00Z,Shopify Rebellion,Disguised,1.98,1.78
+LCS,2026-05-18T22:00:00Z,Sentinels,Dignitas,1.14,5.40
+LCS,2026-05-19T01:00:00Z,FlyQuest,LYON,2.90,1.38

@@ -1,0 +1,9 @@
+{
+  "note": "LoL listener scaffold ready. Next step is choosing data and odds providers.",
+  "supported_example_markets": [
+    "match_winner",
+    "map_1_winner",
+    "total_kills_over_under",
+    "first_blood"
+  ]
+}

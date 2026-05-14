@@ -1,0 +1,14 @@
+duckdb>=1.5,<2.0
+gdown>=5.2,<6.0
+opencv-python>=4.10,<5.0
+pandas>=2.2,<3.0
+pillow>=10.0,<13.0
+pyTelegramBotAPI>=4.28,<5.0
+pytesseract>=0.3,<1.0
+python-dotenv>=1.0,<2.0
+requests>=2.32,<3.0
+scikit-learn>=1.5,<2.0
+streamlit>=1.45,<2.0
+thefuzz>=0.22,<1.0
+python-Levenshtein>=0.25,<1.0
+xgboost>=2.0,<3.0

@@ -1,0 +1,18 @@
+{
+  "matches": [
+    {
+      "match_id": "lol_1001",
+      "league": "Worlds",
+      "team_1": "T1",
+      "team_2": "Gen.G",
+      "match_datetime": "2026-10-10T12:00:00Z"
+    },
+    {
+      "match_id": "lol_1002",
+      "league": "Worlds",
+      "team_1": "G2",
+      "team_2": "BLG",
+      "match_datetime": "2026-10-10T15:00:00Z"
+    }
+  ]
+}

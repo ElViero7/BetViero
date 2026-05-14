@@ -1,0 +1,23 @@
+league,team_a,team_b,scheduled_at,book_team_a_odd,book_team_b_odd,source_match_id
+LCK,BNK FEARX,Gen.G,2026-05-14 10:00:00+02:00,7.50,1.07,manual::lck::bnk-fearx::gen-g::2026-05-14-1000
+LCK,Kiwoom DRX,KT Rolster,2026-05-14 12:00:00+02:00,4.80,1.17,manual::lck::kiwoom-drx::kt-rolster::2026-05-14-1200
+LCK,Hanwha Life Esports,Dplus KIA,2026-05-15 10:00:00+02:00,1.38,2.90,manual::lck::hanwha-life-esports::dplus-kia::2026-05-15-1000
+LCK,OKSavingsBank BRION,DN SOOPers,2026-05-15 12:00:00+02:00,1.38,2.90,manual::lck::oksavingsbank-brion::dn-soopers::2026-05-15-1200
+LCK,Gen.G,T1,2026-05-16 10:00:00+02:00,1.52,2.40,manual::lck::gen-g::t1::2026-05-16-1000
+LCK,BNK FEARX,Nongshim RedForce,2026-05-16 12:00:00+02:00,1.52,2.40,manual::lck::bnk-fearx::nongshim-redforce::2026-05-16-1200
+LCK,Hanwha Life Esports,KT Rolster,2026-05-17 10:00:00+02:00,1.35,3.05,manual::lck::hanwha-life-esports::kt-rolster::2026-05-17-1000
+LCK,Kiwoom DRX,OKSavingsBank BRION,2026-05-17 12:00:00+02:00,2.25,1.60,manual::lck::kiwoom-drx::oksavingsbank-brion::2026-05-17-1200
+LPL,LGD Gaming,LNG Esports,2026-05-14 11:00:00+02:00,2.50,1.50,manual::lpl::lgd-gaming::lng-esports::2026-05-14-1100
+LPL,Weibo Gaming,JD Gaming,2026-05-14 13:00:00+02:00,2.30,1.56,manual::lpl::weibo-gaming::jd-gaming::2026-05-14-1300
+LPL,Oh My God,Ultra Prime,2026-05-15 11:00:00+02:00,1.64,2.15,manual::lpl::oh-my-god::ultra-prime::2026-05-15-1100
+LPL,Top Esports,Bilibili Gaming,2026-05-15 13:00:00+02:00,2.60,1.47,manual::lpl::top-esports::bilibili-gaming::2026-05-15-1300
+LPL,EDward Gaming,ThunderTalk Gaming,2026-05-16 11:00:00+02:00,1.60,2.25,manual::lpl::edward-gaming::thundertalk-gaming::2026-05-16-1100
+LPL,Team WE,Ninjas in Pyjamas,2026-05-16 13:00:00+02:00,2.80,1.41,manual::lpl::team-we::ninjas-in-pyjamas::2026-05-16-1300
+LPL,JD Gaming,Invictus Gaming,2026-05-17 11:00:00+02:00,1.37,2.95,manual::lpl::jd-gaming::invictus-gaming::2026-05-17-1100
+LPL,Bilibili Gaming,Anyone's Legend,2026-05-17 13:00:00+02:00,1.45,2.65,manual::lpl::bilibili-gaming::anyones-legend::2026-05-17-1300
+LEC,Team Vitality,Movistar KOI,2026-05-23 17:00:00+02:00,2.15,1.62,manual::lec::team-vitality::movistar-koi::2026-05-23-1700
+LEC,Karmine Corp,G2 Esports,2026-05-24 17:00:00+02:00,2.55,1.46,manual::lec::karmine-corp::g2-esports::2026-05-24-1700
+LCS,Team Liquid,Cloud9,2026-05-16 22:00:00+02:00,2.10,1.68,manual::lcs::team-liquid::cloud9::2026-05-16-2200
+LCS,Shopify Rebellion,Disguised,2026-05-17 01:00:00+02:00,1.98,1.78,manual::lcs::shopify-rebellion::disguised::2026-05-17-0100
+LCS,Sentinels,Dignitas,2026-05-17 22:00:00+02:00,1.14,5.40,manual::lcs::sentinels::dignitas::2026-05-17-2200
+LCS,FlyQuest,LYON,2026-05-18 01:00:00+02:00,2.90,1.38,manual::lcs::flyquest::lyon::2026-05-18-0100

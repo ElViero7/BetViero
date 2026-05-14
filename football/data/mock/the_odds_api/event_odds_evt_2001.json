@@ -1,0 +1,27 @@
+{
+  "id": "evt_2001",
+  "sport_key": "soccer_epl",
+  "sport_title": "EPL",
+  "commence_time": "2026-05-07T19:00:00Z",
+  "home_team": "Arsenal",
+  "away_team": "Chelsea",
+  "bookmakers": [
+    {
+      "key": "draftkings",
+      "title": "DraftKings",
+      "last_update": "2026-05-06T18:00:00Z",
+      "markets": [
+        {
+          "key": "team_shots_on_target",
+          "last_update": "2026-05-06T18:00:00Z",
+          "outcomes": [
+            { "name": "Over", "description": "Arsenal", "price": 2.15, "point": 3.5 },
+            { "name": "Under", "description": "Arsenal", "price": 1.72, "point": 3.5 },
+            { "name": "Over", "description": "Chelsea", "price": 2.30, "point": 3.5 },
+            { "name": "Under", "description": "Chelsea", "price": 1.62, "point": 3.5 }
+          ]
+        }
+      ]
+    }
+  ]
+}

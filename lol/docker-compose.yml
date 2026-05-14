@@ -1,0 +1,15 @@
+services:
+  fair-odds-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fair-odds-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./src:/app/src
+      - ./scripts:/app/scripts
+    command: ["python", "scripts/5_telegram_fair_odds_bot.py"]

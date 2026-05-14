@@ -1,0 +1,6 @@
+{
+  "rows": [
+    { "match_id": "lol_2001", "blue_team": "T1", "red_team": "Gen.G", "blue_kills_avg_5": 15.0, "red_kills_allowed_avg_5": 10.5, "blue_dragons_avg_5": 2.4, "red_dragons_allowed_avg_5": 1.7 },
+    { "match_id": "lol_2002", "blue_team": "G2", "red_team": "BLG", "blue_kills_avg_5": 11.5, "red_kills_allowed_avg_5": 12.5, "blue_dragons_avg_5": 1.7, "red_dragons_allowed_avg_5": 2.1 }
+  ]
+}
