@@ -54,6 +54,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 LOL_DIR = PROJECT_ROOT / "lol"
 TENNIS_DIR = PROJECT_ROOT / "tennis"
 
+DISABLED_LOCAL_PROXY_VALUES = {
+    "http://127.0.0.1:9",
+    "https://127.0.0.1:9",
+}
+for proxy_env_name in (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+):
+    if os.environ.get(proxy_env_name) in DISABLED_LOCAL_PROXY_VALUES:
+        os.environ.pop(proxy_env_name, None)
+
 os.environ.setdefault("PREDICTIONS_INPUT_PATH", str(LOL_DIR / "data" / "predictions" / "upcoming_multimarket_predictions.csv"))
 os.environ.setdefault("ORACLES_ELIXIR_RAW_DIR", str(LOL_DIR / "data" / "raw" / "oracles_elixir"))
 os.environ.setdefault("MODEL_ARTIFACT_PATH", str(LOL_DIR / "models" / "modelo_multimarket.pkl"))
@@ -470,6 +485,7 @@ def render_magic_prediction_capture(predictions_frame: pd.DataFrame) -> None:
                 st.warning("Ese partido no existe en el snapshot actual. Primero genera predicciones para ese matchup.")
             else:
                 st.session_state["register_match_name"] = selected_match_name
+                st.session_state["lol_register_match_name"] = selected_match_name
                 st.session_state["force_register_page"] = True
                 st.success(f"Partido cargado en calculadora: {selected_match_name}")
                 st.rerun()
@@ -783,13 +799,25 @@ def render_pending_pick_decision(bot_config: BotConfig) -> None:
         st.rerun()
 
 
+def render_lol_pick_metrics(payload: dict[str, object]) -> None:
+    metric_cols = st.columns(5)
+    metric_cols[0].metric("Probabilidad", format_percentage(payload.get("model_probability")))
+    metric_cols[1].metric("Cuota justa", format_currency(payload.get("model_fair_odd")))
+    metric_cols[2].metric("Edge", format_percentage(payload.get("edge")))
+    metric_cols[3].metric("EV", format_percentage(payload.get("ev")))
+    metric_cols[4].metric("Stake Kelly", format_currency(payload.get("recommended_stake")))
+
+
+def register_lol_pick(bot_config: BotConfig, payload: dict[str, object], bet_type: str) -> None:
+    stored_payload = dict(payload)
+    stored_payload["bet_type"] = bet_type
+    insert_pick_to_supabase(bot_config, stored_payload)
+    load_dashboard_data.clear()
+
+
 def render_register_page(bot_config: BotConfig, predictions_frame: pd.DataFrame, current_bankroll: float) -> None:
     st.subheader("Registrar pick")
     st.caption(f"Bankroll dinamico actual: {current_bankroll:.2f} EUR")
-
-    if st.session_state.get("pending_pick") is not None:
-        render_pending_pick_decision(bot_config)
-        return
 
     if predictions_frame.empty:
         st.info("No hay snapshot de predicciones. Primero haz un scan.")
@@ -797,8 +825,12 @@ def render_register_page(bot_config: BotConfig, predictions_frame: pd.DataFrame,
 
     match_options = predictions_frame["match_name"].dropna().astype(str).tolist()
     preselected_match = st.session_state.get("register_match_name")
-    match_index = match_options.index(preselected_match) if preselected_match in match_options else 0
-    match_name = st.selectbox("Partido", match_options, index=match_index)
+    if "lol_register_match_name" not in st.session_state:
+        st.session_state["lol_register_match_name"] = preselected_match if preselected_match in match_options else match_options[0]
+    if st.session_state["lol_register_match_name"] not in match_options:
+        st.session_state["lol_register_match_name"] = match_options[0]
+    match_name = st.selectbox("Partido", match_options, key="lol_register_match_name")
+    st.session_state["register_match_name"] = match_name
     row = predictions_frame.loc[predictions_frame["match_name"].astype(str) == match_name].iloc[0]
 
     st.markdown(
@@ -815,33 +847,57 @@ def render_register_page(bot_config: BotConfig, predictions_frame: pd.DataFrame,
         unsafe_allow_html=True,
     )
 
-    pick_mode = st.radio("Modo", ["Registrar mercado binario", "Evaluar kills", "Registrar kills"], horizontal=True)
+    pick_mode = st.radio(
+        "Modo",
+        ["Registrar mercado binario", "Evaluar kills", "Registrar kills"],
+        horizontal=True,
+        key="lol_register_mode",
+    )
 
     if pick_mode == "Registrar mercado binario":
         available_markets = ["winner", "firsttower"] + ([] if row["league"] == "LPL" else ["firstblood"])
-        market = st.selectbox("Mercado", available_markets)
+        if st.session_state.get("lol_register_market") not in available_markets:
+            st.session_state["lol_register_market"] = available_markets[0]
+        market = st.selectbox("Mercado", available_markets, key="lol_register_market")
+        selection_options = [f"1 - {row['team_a']}", f"2 - {row['team_b']}"]
+        if st.session_state.get("lol_register_selection") not in selection_options:
+            st.session_state["lol_register_selection"] = selection_options[0]
         selection_label = st.radio(
             "Seleccion",
-            [f"1 - {row['team_a']}", f"2 - {row['team_b']}"],
+            selection_options,
             horizontal=True,
+            key="lol_register_selection",
         )
-        odd = st.number_input("Cuota", min_value=1.01, step=0.01, format="%.2f")
-        if st.button("Calcular Valor", use_container_width=True):
+        odd = st.number_input("Cuota", min_value=1.01, step=0.01, format="%.2f", key="lol_register_odd")
+        payload: dict[str, object] | None = None
+        try:
+            selection_key = "1" if selection_label.startswith("1") else "2"
+            payload = compute_pick_payload_from_row(
+                bot_config,
+                row,
+                market,
+                selection_key,
+                float(odd),
+                current_bankroll,
+            )
+            render_lol_pick_metrics(payload)
+            if float(payload["recommended_stake"]) <= 0:
+                st.warning("Sin valor")
+        except Exception as exc:
+            st.error(str(exc))
+
+        real_col, paper_col = st.columns(2)
+        can_register = payload is not None and float(payload["recommended_stake"]) > 0
+        if real_col.button("Registrar real", use_container_width=True, disabled=not can_register):
             try:
-                selection_key = "1" if selection_label.startswith("1") else "2"
-                payload = compute_pick_payload_from_row(
-                    bot_config,
-                    row,
-                    market,
-                    selection_key,
-                    float(odd),
-                    current_bankroll,
-                )
-                if payload["recommended_stake"] <= 0:
-                    st.warning("Sin valor")
-                else:
-                    st.session_state["pending_pick"] = payload
-                    st.rerun()
+                register_lol_pick(bot_config, payload, "real")
+                st.success("Apuesta real registrada.")
+            except Exception as exc:
+                st.error(str(exc))
+        if paper_col.button("Registrar paper", use_container_width=True, disabled=not can_register):
+            try:
+                register_lol_pick(bot_config, payload, "paper")
+                st.success("Pick paper registrado.")
             except Exception as exc:
                 st.error(str(exc))
 
@@ -851,6 +907,7 @@ def render_register_page(bot_config: BotConfig, predictions_frame: pd.DataFrame,
             "Lineas kills",
             placeholder="28.5 1.68 2.00\n29.5 1.84 1.86\n30.5 2.00 1.70",
             height=160,
+            key="lol_evaluate_kills_text",
         )
         if st.button("Evaluar lineas kills", use_container_width=True):
             try:
@@ -883,25 +940,38 @@ def render_register_page(bot_config: BotConfig, predictions_frame: pd.DataFrame,
                 st.error(str(exc))
 
     else:
-        side = st.radio("Lado", ["Over", "Under"], horizontal=True)
-        line_value = st.number_input("Linea", min_value=1.0, step=0.5, format="%.1f")
+        side = st.radio("Lado", ["Over", "Under"], horizontal=True, key="lol_kills_side")
+        line_value = st.number_input("Linea", min_value=1.0, step=0.5, format="%.1f", key="lol_kills_line")
         odd = st.number_input("Cuota kills", min_value=1.01, step=0.01, format="%.2f", key="kills_odd")
-        if st.button("Calcular Valor", use_container_width=True, key="calculate_kills_value"):
+        payload = None
+        try:
+            payload = compute_pick_payload_from_row(
+                bot_config,
+                row,
+                "kills",
+                side,
+                float(odd),
+                current_bankroll,
+                float(line_value),
+            )
+            render_lol_pick_metrics(payload)
+            if float(payload["recommended_stake"]) <= 0:
+                st.warning("Sin valor")
+        except Exception as exc:
+            st.error(str(exc))
+
+        real_col, paper_col = st.columns(2)
+        can_register = payload is not None and float(payload["recommended_stake"]) > 0
+        if real_col.button("Registrar kills real", use_container_width=True, disabled=not can_register):
             try:
-                payload = compute_pick_payload_from_row(
-                    bot_config,
-                    row,
-                    "kills",
-                    side,
-                    float(odd),
-                    current_bankroll,
-                    float(line_value),
-                )
-                if payload["recommended_stake"] <= 0:
-                    st.warning("Sin valor")
-                else:
-                    st.session_state["pending_pick"] = payload
-                    st.rerun()
+                register_lol_pick(bot_config, payload, "real")
+                st.success("Apuesta real registrada.")
+            except Exception as exc:
+                st.error(str(exc))
+        if paper_col.button("Registrar kills paper", use_container_width=True, disabled=not can_register):
+            try:
+                register_lol_pick(bot_config, payload, "paper")
+                st.success("Pick paper registrado.")
             except Exception as exc:
                 st.error(str(exc))
 
