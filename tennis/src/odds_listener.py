@@ -9,6 +9,11 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
+try:
+    from db import TennisDatabaseError, fetch_tennis_table, upsert_tennis_rows
+except ModuleNotFoundError:
+    from tennis.src.db import TennisDatabaseError, fetch_tennis_table, upsert_tennis_rows
+
 
 load_dotenv()
 
@@ -19,6 +24,8 @@ THE_ODDS_API_BASE_URL = os.getenv("THE_ODDS_API_BASE_URL", "https://api.the-odds
 SPORT_KEY = os.getenv("TENNIS_ODDS_SPORT_KEY", "tennis_atp")
 REGIONS = os.getenv("TENNIS_ODDS_REGIONS", "eu,uk")
 MARKETS = "h2h,totals,spreads"
+UPCOMING_ODDS_TABLE = "upcoming_odds"
+UPCOMING_ODDS_CONFLICT_KEY = "quote_key"
 
 
 class TennisOddsListenerError(RuntimeError):
@@ -196,6 +203,7 @@ def normalize_market_odds(events: list[dict[str, Any]]) -> pd.DataFrame:
                     rows.append(
                         {
                             "event_id": event.get("id"),
+                            "sport_key": event.get("sport_key"),
                             "commence_time": event.get("commence_time"),
                             "jugador_a_api": player_a,
                             "jugador_b_api": player_b,
@@ -211,6 +219,108 @@ def normalize_market_odds(events: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def build_quote_key(row: pd.Series | dict[str, Any]) -> str:
+    line = row.get("line")
+    line_key = "null" if pd.isna(line) else f"{float(line):.4f}"
+    return "|".join(
+        [
+            "the_odds_api",
+            str(row.get("event_id") or ""),
+            str(row.get("bookmaker_key") or ""),
+            str(row.get("market") or ""),
+            str(row.get("selection") or ""),
+            line_key,
+        ]
+    )
+
+
+def build_upcoming_odds_rows(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    if frame.empty:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    collected_at = datetime.now(timezone.utc).isoformat()
+    for _, row in frame.iterrows():
+        price = float(row["odds"])
+        line = row.get("line")
+        rows.append(
+            {
+                "quote_key": build_quote_key(row),
+                "source": "the_odds_api",
+                "external_event_id": str(row.get("event_id") or ""),
+                "sport_key": row.get("sport_key"),
+                "commence_time": row.get("commence_time"),
+                "player_1": str(row.get("jugador_a_api") or ""),
+                "player_2": str(row.get("jugador_b_api") or ""),
+                "bookmaker_key": str(row.get("bookmaker_key") or ""),
+                "bookmaker_title": row.get("bookmaker_title"),
+                "market_key": str(row.get("market") or ""),
+                "selection": str(row.get("selection") or ""),
+                "line": None if pd.isna(line) else float(line),
+                "price": price,
+                "implied_probability": 1.0 / price if price > 0 else None,
+                "collected_at": collected_at,
+                "raw_payload": {
+                    "event_id": row.get("event_id"),
+                    "casa_apuestas": row.get("casa_apuestas"),
+                    "market": row.get("market"),
+                    "selection": row.get("selection"),
+                    "line": None if pd.isna(line) else float(line),
+                    "odds": price,
+                },
+            }
+        )
+    return rows
+
+
+def fetch_existing_upcoming_prices() -> dict[str, float]:
+    existing = fetch_tennis_table(
+        UPCOMING_ODDS_TABLE,
+        select="quote_key,price",
+        filters={"quote_key": "not.is.null"},
+    )
+    if existing.empty:
+        return {}
+
+    prices: dict[str, float] = {}
+    for _, row in existing.iterrows():
+        quote_key = row.get("quote_key")
+        price = row.get("price")
+        if pd.isna(quote_key) or pd.isna(price):
+            continue
+        prices[str(quote_key)] = float(price)
+    return prices
+
+
+def filter_changed_upcoming_odds_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+
+    existing_prices = fetch_existing_upcoming_prices()
+    changed_rows: list[dict[str, Any]] = []
+    for row in rows:
+        quote_key = str(row["quote_key"])
+        current_price = float(row["price"])
+        existing_price = existing_prices.get(quote_key)
+        if existing_price is None or abs(existing_price - current_price) >= 1e-9:
+            changed_rows.append(row)
+    return changed_rows
+
+
+def save_upcoming_odds_to_supabase(frame: pd.DataFrame) -> int:
+    rows = build_upcoming_odds_rows(frame)
+    changed_rows = filter_changed_upcoming_odds_rows(rows)
+    if not changed_rows:
+        return 0
+
+    upsert_tennis_rows(
+        UPCOMING_ODDS_TABLE,
+        changed_rows,
+        on_conflict=UPCOMING_ODDS_CONFLICT_KEY,
+    )
+    return len(changed_rows)
+
+
 def save_market_odds(frame: pd.DataFrame, output_path: Path = OUTPUT_PATH) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(output_path, index=False)
@@ -220,6 +330,11 @@ def run(output_path: Path = OUTPUT_PATH) -> pd.DataFrame:
     events = fetch_market_odds()
     frame = normalize_market_odds(events)
     save_market_odds(frame, output_path)
+    try:
+        saved_rows = save_upcoming_odds_to_supabase(frame)
+        print(f"[Supabase] Upcoming odds new/changed rows upserted: {saved_rows}")
+    except TennisDatabaseError as exc:
+        print(f"[Supabase] Upcoming odds not saved: {exc}")
     return frame
 
 

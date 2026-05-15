@@ -82,6 +82,7 @@ execute function tennis.set_updated_at();
 
 create table if not exists tennis.upcoming_odds (
   id uuid primary key default gen_random_uuid(),
+  quote_key text,
   source text not null default 'the_odds_api',
   external_event_id text not null,
   sport_key text,
@@ -124,6 +125,9 @@ create index if not exists idx_tennis_upcoming_odds_event_market
 create index if not exists idx_tennis_upcoming_odds_collected
   on tennis.upcoming_odds (collected_at desc);
 
+create unique index if not exists idx_tennis_upcoming_odds_quote_key
+  on tennis.upcoming_odds (quote_key);
+
 create unique index if not exists idx_tennis_upcoming_odds_unique_quote
   on tennis.upcoming_odds (
     source,
@@ -142,6 +146,7 @@ execute function tennis.set_updated_at();
 
 create table if not exists tennis.bets_log (
   id uuid primary key default gen_random_uuid(),
+  tennis_pick_id uuid references tennis.tennis_picks (id) on delete set null,
   upcoming_odds_id uuid references tennis.upcoming_odds (id) on delete set null,
   match_history_id uuid references tennis.matches_history (id) on delete set null,
   placed_at timestamptz not null default now(),
@@ -188,6 +193,9 @@ create index if not exists idx_tennis_bets_log_status
 
 create index if not exists idx_tennis_bets_log_event
   on tennis.bets_log (event_time, player_1, player_2);
+
+create index if not exists idx_tennis_bets_log_tennis_pick
+  on tennis.bets_log (tennis_pick_id);
 
 drop trigger if exists trg_bets_log_updated_at on tennis.bets_log;
 create trigger trg_bets_log_updated_at
