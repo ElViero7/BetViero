@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 import os
 import pickle
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,7 @@ from dotenv import load_dotenv
 
 from .base import LoLPipelineError
 from .multimarket import (
+    KILLS_LINES,
     MultiMarketTrainingConfig,
     calculate_ev,
     calculate_fair_odd,
@@ -36,6 +39,8 @@ EXCLUDED_LEAGUE_TOKENS = (
     "2nd division",
 )
 SUPPORTED_MARKETS = {"winner", "firstblood", "firsttower", "kills"}
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -61,8 +66,30 @@ class BotConfig:
 def require_env(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
-        raise LoLPipelineError(f"Missing required environment variable: {name}")
+        logger.critical("Missing required environment variable: %s", name)
+        raise LoLPipelineError("Configuración incompleta. Contacta al administrador.")
     return value
+
+
+def sanitize_for_json(payload: dict[str, Any]) -> dict[str, Any]:
+    sanitized: dict[str, Any] = {}
+    for key, value in payload.items():
+        if value is None or value is pd.NA or value is pd.NaT:
+            sanitized[key] = None
+        elif isinstance(value, pd.Timestamp):
+            sanitized[key] = None if pd.isna(value) else value.isoformat()
+        elif isinstance(value, datetime):
+            sanitized[key] = value.isoformat()
+        elif isinstance(value, date):
+            sanitized[key] = value.isoformat()
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            sanitized[key] = None if not math.isfinite(float(value)) else value
+        else:
+            try:
+                sanitized[key] = None if pd.isna(value) else value
+            except (TypeError, ValueError):
+                sanitized[key] = value
+    return sanitized
 
 
 def load_config() -> BotConfig:
@@ -97,6 +124,32 @@ def load_config() -> BotConfig:
         kelly_fraction=float(os.getenv("KELLY_FRACTION", "0.25")),
         max_stake_amount=float(os.getenv("MAX_STAKE_AMOUNT", "1.0")),
     )
+
+
+def get_dynamic_bankroll(config: BotConfig) -> float:
+    url = f"{config.supabase_url}/rest/v1/picks"
+    headers = {
+        "apikey": config.supabase_service_role_key,
+        "Authorization": f"Bearer {config.supabase_service_role_key}",
+    }
+    try:
+        response = requests.get(
+            url,
+            headers=headers,
+            params={"select": "pnl", "status": "in.(won,lost)"},
+            timeout=15,
+        )
+        if response.status_code == 200:
+            data = response.json()
+            total_pnl = sum(float(item.get("pnl") or 0.0) for item in data)
+            return config.bankroll_amount + total_pnl
+    except Exception as exc:
+        logger.warning(
+            "No se pudo obtener el PnL de Supabase para bankroll dinámico: %s",
+            exc,
+        )
+
+    return config.bankroll_amount
 
 
 def normalize_team_name(name: str) -> str:
@@ -528,6 +581,50 @@ class FairOddsEngine:
         prediction = market_artifact["model"].predict(frame[feature_columns])
         return float(prediction[0])
 
+    def _predict_kills_over_prob(self, matchup_row: dict[str, Any], line: float) -> float:
+        line_value = float(line)
+        trained_lines = sorted(float(value) for value in KILLS_LINES)
+        if line_value in trained_lines:
+            line_key = str(line_value).replace(".", "_")
+            market_key = f"kills_over_{line_key}"
+            if market_key not in self.market_models:
+                predicted_total = self._predict_total_kills(matchup_row)
+                residual_std = float(self.market_models["kills"]["metrics"].get("residual_std", 6.0))
+                logger.warning(
+                    "El modelo no contiene %s. Usando fallback de regresion para kills hasta reentrenar.",
+                    market_key,
+                )
+                return estimate_over_under_probability(
+                    predicted_total=predicted_total,
+                    line=line_value,
+                    residual_std=residual_std,
+                    direction="over",
+                )
+            market_artifact = self.market_models[market_key]
+            frame = pd.DataFrame([matchup_row])
+            feature_columns = market_artifact["feature_columns"]
+            missing_columns = [column for column in feature_columns if column not in frame.columns]
+            if missing_columns:
+                missing_list = ", ".join(missing_columns)
+                raise LoLPipelineError(f"Missing inference features for {market_key}: {missing_list}")
+            probabilities = market_artifact["model"].predict_proba(frame[feature_columns])[:, 1]
+            return float(probabilities[0])
+
+        if line_value < trained_lines[0]:
+            lower_line, upper_line = trained_lines[0], trained_lines[1]
+        elif line_value > trained_lines[-1]:
+            lower_line, upper_line = trained_lines[-2], trained_lines[-1]
+        else:
+            lower_line = max(value for value in trained_lines if value < line_value)
+            upper_line = min(value for value in trained_lines if value > line_value)
+
+        lower_prob = self._predict_kills_over_prob(matchup_row, lower_line)
+        upper_prob = self._predict_kills_over_prob(matchup_row, upper_line)
+        interpolated = lower_prob + (upper_prob - lower_prob) * (
+            (line_value - lower_line) / (upper_line - lower_line)
+        )
+        return min(1.0, max(0.0, float(interpolated)))
+
     def score_upcoming_matches(self) -> pd.DataFrame:
         raw_matches = self.fetch_upcoming_matches()
         scored_rows: list[dict[str, Any]] = []
@@ -636,6 +733,13 @@ class FairOddsEngine:
                 + kills_if_b_blue
                 + kills_if_b_blue_red_fp
             ) / 4.0
+            for line in KILLS_LINES:
+                row_payload[f"prob_over_{str(line).replace('.', '_')}"] = (
+                    self._predict_kills_over_prob(scenario_a_blue, line)
+                    + self._predict_kills_over_prob(scenario_a_blue_red_fp, line)
+                    + self._predict_kills_over_prob(scenario_b_blue, line)
+                    + self._predict_kills_over_prob(scenario_b_blue_red_fp, line)
+                ) / 4.0
             row_payload["kills_residual_std"] = float(
                 self.market_models["kills"]["metrics"].get("residual_std", 6.0)
             )
@@ -761,6 +865,13 @@ class FairOddsEngine:
                 + kills_if_b_blue
                 + kills_if_b_blue_red_fp
             ) / 4.0
+            for line in KILLS_LINES:
+                row_payload[f"prob_over_{str(line).replace('.', '_')}"] = (
+                    self._predict_kills_over_prob(scenario_a_blue, line)
+                    + self._predict_kills_over_prob(scenario_a_blue_red_fp, line)
+                    + self._predict_kills_over_prob(scenario_b_blue, line)
+                    + self._predict_kills_over_prob(scenario_b_blue_red_fp, line)
+                ) / 4.0
             row_payload["kills_residual_std"] = float(
                 self.market_models["kills"]["metrics"].get("residual_std", 6.0)
             )
@@ -858,6 +969,35 @@ def load_prediction_row(config: BotConfig, match_name: str) -> pd.Series:
     return matches.iloc[0]
 
 
+def _kills_prob_column(line: float) -> str:
+    return f"prob_over_{str(float(line)).replace('.', '_')}"
+
+
+def get_kills_over_probability_from_row(row: pd.Series, line: float) -> float:
+    line_value = float(line)
+    trained_lines = sorted(float(value) for value in KILLS_LINES)
+    if line_value in trained_lines:
+        column = _kills_prob_column(line_value)
+        if column not in row or pd.isna(row[column]):
+            raise LoLPipelineError(f"El snapshot no tiene probabilidad de kills para linea {line_value}.")
+        return float(row[column])
+
+    if line_value < trained_lines[0]:
+        lower_line, upper_line = trained_lines[0], trained_lines[1]
+    elif line_value > trained_lines[-1]:
+        lower_line, upper_line = trained_lines[-2], trained_lines[-1]
+    else:
+        lower_line = max(value for value in trained_lines if value < line_value)
+        upper_line = min(value for value in trained_lines if value > line_value)
+
+    lower_prob = get_kills_over_probability_from_row(row, lower_line)
+    upper_prob = get_kills_over_probability_from_row(row, upper_line)
+    interpolated = lower_prob + (upper_prob - lower_prob) * (
+        (line_value - lower_line) / (upper_line - lower_line)
+    )
+    return min(1.0, max(0.0, float(interpolated)))
+
+
 def parse_pick_message(
     text: str,
 ) -> dict[str, Any] | None:
@@ -930,6 +1070,7 @@ def build_pick_payload_from_reply(
     reply_text: str,
     alert_text: str,
 ) -> dict[str, Any]:
+    current_bankroll = get_dynamic_bankroll(config)
     parsed_pick = parse_pick_message(reply_text)
     if parsed_pick is None:
         raise LoLPipelineError(
@@ -953,19 +1094,12 @@ def build_pick_payload_from_reply(
     predicted_value: float | None = None
 
     if market == "kills":
-        predicted_total = parse_kills_prediction_from_alert(alert_text)
-        if predicted_total is None:
-            raise LoLPipelineError("No pude extraer la prediccion de kills del mensaje original.")
         prediction_row = load_prediction_row(config, match_name)
-        residual_std = float(prediction_row.get("kills_residual_std", 6.0))
+        predicted_total = float(prediction_row["kills_prediction"])
         line = float(parsed_pick["line"])
         selection = str(parsed_pick["selection"])
-        model_probability = estimate_over_under_probability(
-            predicted_total=predicted_total,
-            line=line,
-            residual_std=residual_std,
-            direction=selection,
-        )
+        over_probability = get_kills_over_probability_from_row(prediction_row, line)
+        model_probability = over_probability if selection.lower() == "over" else 1.0 - over_probability
         model_fair_odd = calculate_fair_odd(model_probability)
         predicted_value = predicted_total
     else:
@@ -1014,7 +1148,7 @@ def build_pick_payload_from_reply(
     full_kelly = calculate_kelly_fraction(model_probability, my_odd)
     applied_kelly = full_kelly * config.kelly_fraction
     recommended_stake = min(
-        config.bankroll_amount * applied_kelly,
+        current_bankroll * applied_kelly,
         config.max_stake_amount,
     )
 
@@ -1034,7 +1168,7 @@ def build_pick_payload_from_reply(
         "full_kelly": full_kelly,
         "kelly_fraction": config.kelly_fraction,
         "recommended_stake": recommended_stake,
-        "bankroll_snapshot": config.bankroll_amount,
+        "bankroll_snapshot": current_bankroll,
         "status": "pending",
     }
 
@@ -1044,6 +1178,7 @@ def evaluate_kills_batch_from_reply(
     reply_text: str,
     alert_text: str,
 ) -> list[dict[str, Any]] | None:
+    current_bankroll = get_dynamic_bankroll(config)
     options = parse_kills_batch_message(reply_text)
     if options is None:
         return None
@@ -1052,21 +1187,14 @@ def evaluate_kills_batch_from_reply(
     if not match_name:
         raise LoLPipelineError("No pude extraer el partido del mensaje original.")
     league = parse_league_from_alert(alert_text)
-    predicted_total = parse_kills_prediction_from_alert(alert_text)
-    if predicted_total is None:
-        raise LoLPipelineError("No pude extraer la prediccion de kills del mensaje original.")
     prediction_row = load_prediction_row(config, match_name)
-    residual_std = float(prediction_row.get("kills_residual_std", 6.0))
+    predicted_total = float(prediction_row["kills_prediction"])
 
     evaluations: list[dict[str, Any]] = []
     for option in options:
         for direction, odd in [("Over", option["over_odd"]), ("Under", option["under_odd"])]:
-            probability = estimate_over_under_probability(
-                predicted_total=predicted_total,
-                line=float(option["line"]),
-                residual_std=residual_std,
-                direction=direction,
-            )
+            over_probability = get_kills_over_probability_from_row(prediction_row, float(option["line"]))
+            probability = over_probability if direction.lower() == "over" else 1.0 - over_probability
             fair_odd = calculate_fair_odd(probability)
             implied_probability = calculate_implied_probability(float(odd))
             edge = probability - implied_probability
@@ -1074,7 +1202,7 @@ def evaluate_kills_batch_from_reply(
             full_kelly = calculate_kelly_fraction(probability, float(odd))
             applied_kelly = full_kelly * config.kelly_fraction
             recommended_stake = min(
-                config.bankroll_amount * applied_kelly,
+                current_bankroll * applied_kelly,
                 config.max_stake_amount,
             )
             evaluations.append(
@@ -1094,7 +1222,7 @@ def evaluate_kills_batch_from_reply(
                     "full_kelly": full_kelly,
                     "kelly_fraction": config.kelly_fraction,
                     "recommended_stake": recommended_stake,
-                    "bankroll_snapshot": config.bankroll_amount,
+                    "bankroll_snapshot": current_bankroll,
                     "status": "pending",
                 }
             )
@@ -1120,7 +1248,8 @@ def insert_pick_to_supabase(config: BotConfig, payload: dict[str, Any]) -> None:
         "Content-Profile": config.supabase_schema,
         "Prefer": "return=minimal",
     }
-    response = requests.post(url, headers=headers, json=payload, timeout=30)
+    sanitized_payload = sanitize_for_json(payload)
+    response = requests.post(url, headers=headers, json=sanitized_payload, timeout=30)
     if response.status_code >= 400:
         raise LoLPipelineError(
             f"Supabase insert failed ({response.status_code}): {response.text}"

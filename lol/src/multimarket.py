@@ -7,7 +7,10 @@ from pathlib import Path
 from statistics import NormalDist
 from typing import Any
 
+import numpy as np
 import pandas as pd
+from sklearn.base import clone
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression, Ridge
@@ -18,6 +21,7 @@ from sklearn.metrics import (
     mean_squared_error,
     roc_auc_score,
 )
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from xgboost import XGBClassifier, XGBRegressor
@@ -33,6 +37,7 @@ from .firstblood import (
 )
 
 TRAINING_RULE_LABEL = "2025 all games + 2026 map1 only"
+KILLS_LINES = [21.5, 23.5, 25.5, 27.5, 29.5, 31.5, 33.5]
 TEAM_REQUIRED_COLUMNS = {
     "datacompleteness",
     "position",
@@ -530,6 +535,10 @@ def build_multimarket_matchup_frame(
         errors="coerce",
     )
     matchup["target_total_kills"] = matchup["blue_kills"] + matchup["red_kills"]
+    for line in KILLS_LINES:
+        matchup[f"target_over_{str(line).replace('.', '_')}"] = (
+            matchup["target_total_kills"] > line
+        ).astype(int)
     matchup["target_kill_diff"] = matchup["blue_kills"] - matchup["red_kills"]
     matchup["blue_has_firstpick"] = pd.to_numeric(
         matchup["blue_has_firstpick"],
@@ -710,27 +719,29 @@ def build_xgb_regressor_pipeline(
     )
 
 
-def split_train_test(
-    frame: pd.DataFrame,
-    config: MultiMarketTrainingConfig,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _validate_training_rows(frame: pd.DataFrame, config: MultiMarketTrainingConfig) -> None:
     if len(frame) < config.min_train_rows:
         raise LoLPipelineError(
             f"Not enough matchup rows to train. Need at least {config.min_train_rows}, got {len(frame)}."
         )
-    test_rows = max(1, int(len(frame) * config.test_size))
-    train_frame = frame.iloc[:-test_rows].copy()
-    test_frame = frame.iloc[-test_rows:].copy()
-    if train_frame.empty or test_frame.empty:
-        raise LoLPipelineError("Train/test split produced an empty partition.")
-    return train_frame, test_frame
+
+
+def _mean_metric(metrics: list[dict[str, float | None]], key: str) -> float | None:
+    values = [
+        float(metric[key])
+        for metric in metrics
+        if metric.get(key) is not None and not pd.isna(metric.get(key))
+    ]
+    if not values:
+        return None
+    return float(np.mean(values))
 
 
 def _classification_metrics(y_true: pd.Series, probabilities: pd.Series) -> dict[str, float | None]:
     predictions = (probabilities >= 0.5).astype(int)
     metrics: dict[str, float | None] = {
         "accuracy": float(accuracy_score(y_true, predictions)),
-        "log_loss": float(log_loss(y_true, probabilities)),
+        "log_loss": float(log_loss(y_true, probabilities, labels=[0, 1])),
         "roc_auc": None,
     }
     if y_true.nunique() > 1:
@@ -753,8 +764,9 @@ def train_binary_market_model(
 ) -> dict[str, Any]:
     matchup_frame = matchup_frame.dropna(subset=[target_column]).copy()
     matchup_frame[target_column] = matchup_frame[target_column].astype(int)
-    train_frame, test_frame = split_train_test(matchup_frame, config)
+    _validate_training_rows(matchup_frame, config)
     categorical_features, numeric_features, feature_columns = build_market_feature_columns(market)
+    tscv = TimeSeriesSplit(n_splits=5)
     candidates: list[dict[str, Any]] = []
 
     for name, pipeline in [
@@ -767,16 +779,37 @@ def train_binary_market_model(
             build_xgb_classifier_pipeline(categorical_features, numeric_features, config.random_state),
         ),
     ]:
-        pipeline.fit(train_frame[feature_columns], train_frame[target_column])
-        probabilities = pd.Series(
-            pipeline.predict_proba(test_frame[feature_columns])[:, 1],
-            index=test_frame.index,
+        fold_metrics: list[dict[str, float | None]] = []
+        for train_idx, test_idx in tscv.split(matchup_frame):
+            train_fold = matchup_frame.iloc[train_idx].copy()
+            test_fold = matchup_frame.iloc[test_idx].copy()
+            calibrated_model = CalibratedClassifierCV(
+                estimator=clone(pipeline),
+                method="sigmoid",
+                cv=5,
+            )
+            calibrated_model.fit(train_fold[feature_columns], train_fold[target_column])
+            probabilities = pd.Series(
+                calibrated_model.predict_proba(test_fold[feature_columns])[:, 1],
+                index=test_fold.index,
+            )
+            fold_metrics.append(_classification_metrics(test_fold[target_column], probabilities))
+
+        final_model = CalibratedClassifierCV(
+            estimator=clone(pipeline),
+            method="sigmoid",
+            cv=5,
         )
+        final_model.fit(matchup_frame[feature_columns], matchup_frame[target_column])
         candidates.append(
             {
                 "name": name,
-                "model": pipeline,
-                "metrics": _classification_metrics(test_frame[target_column], probabilities),
+                "model": final_model,
+                "metrics": {
+                    "accuracy": _mean_metric(fold_metrics, "accuracy"),
+                    "log_loss": _mean_metric(fold_metrics, "log_loss"),
+                    "roc_auc": _mean_metric(fold_metrics, "roc_auc"),
+                },
             }
         )
 
@@ -796,8 +829,9 @@ def train_binary_market_model(
         "model": champion["model"],
         "feature_columns": feature_columns,
         "metrics": {
-            "train_rows": int(len(train_frame)),
-            "test_rows": int(len(test_frame)),
+            "train_rows": int(len(matchup_frame)),
+            "test_rows": int(sum(len(test_idx) for _, test_idx in tscv.split(matchup_frame))),
+            "validation_folds": int(tscv.n_splits),
             "selected_model_name": champion["name"],
             "candidate_metrics": {
                 candidate["name"]: candidate["metrics"] for candidate in ranked_candidates
@@ -813,8 +847,9 @@ def train_regression_market_model(
     market: str,
     config: MultiMarketTrainingConfig,
 ) -> dict[str, Any]:
-    train_frame, test_frame = split_train_test(matchup_frame, config)
+    _validate_training_rows(matchup_frame, config)
     categorical_features, numeric_features, feature_columns = build_market_feature_columns(market)
+    tscv = TimeSeriesSplit(n_splits=5)
     candidates: list[dict[str, Any]] = []
 
     for name, pipeline in [
@@ -824,16 +859,29 @@ def train_regression_market_model(
             build_xgb_regressor_pipeline(categorical_features, numeric_features, config.random_state),
         ),
     ]:
-        pipeline.fit(train_frame[feature_columns], train_frame[target_column])
-        predictions = pd.Series(
-            pipeline.predict(test_frame[feature_columns]),
-            index=test_frame.index,
-        )
+        fold_metrics: list[dict[str, float | None]] = []
+        for train_idx, test_idx in tscv.split(matchup_frame):
+            train_fold = matchup_frame.iloc[train_idx].copy()
+            test_fold = matchup_frame.iloc[test_idx].copy()
+            fold_model = clone(pipeline)
+            fold_model.fit(train_fold[feature_columns], train_fold[target_column])
+            predictions = pd.Series(
+                fold_model.predict(test_fold[feature_columns]),
+                index=test_fold.index,
+            )
+            fold_metrics.append(_regression_metrics(test_fold[target_column], predictions))
+
+        final_model = clone(pipeline)
+        final_model.fit(matchup_frame[feature_columns], matchup_frame[target_column])
         candidates.append(
             {
                 "name": name,
-                "model": pipeline,
-                "metrics": _regression_metrics(test_frame[target_column], predictions),
+                "model": final_model,
+                "metrics": {
+                    "rmse": _mean_metric(fold_metrics, "rmse"),
+                    "mae": _mean_metric(fold_metrics, "mae"),
+                    "residual_std": _mean_metric(fold_metrics, "residual_std"),
+                },
             }
         )
 
@@ -846,8 +894,9 @@ def train_regression_market_model(
         "model": champion["model"],
         "feature_columns": feature_columns,
         "metrics": {
-            "train_rows": int(len(train_frame)),
-            "test_rows": int(len(test_frame)),
+            "train_rows": int(len(matchup_frame)),
+            "test_rows": int(sum(len(test_idx) for _, test_idx in tscv.split(matchup_frame))),
+            "validation_folds": int(tscv.n_splits),
             "selected_model_name": champion["name"],
             "candidate_metrics": {
                 candidate["name"]: candidate["metrics"] for candidate in ranked_candidates
@@ -937,6 +986,14 @@ def train_multimarket_pipeline(
             **train_regression_market_model(matchup_frame, "target_total_kills", "kills", config),
         },
     }
+    for line in KILLS_LINES:
+        target_col = f"target_over_{str(line).replace('.', '_')}"
+        market_models[f"kills_over_{str(line).replace('.', '_')}"] = {
+            "market_type": "classification",
+            "target_column": target_col,
+            **train_binary_market_model(matchup_frame, target_col, "kills", config),
+        }
+
     save_multimarket_artifact(
         market_models=market_models,
         output_path=model_output_path,

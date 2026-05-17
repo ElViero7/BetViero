@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,8 @@ from dotenv import load_dotenv
 from gdown.parse_url import parse_url
 
 from .base import LoLPipelineError
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -28,7 +31,8 @@ class DashboardConfig:
 def require_env(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
-        raise LoLPipelineError(f"Missing required environment variable: {name}")
+        logger.critical("Missing required environment variable: %s", name)
+        raise LoLPipelineError("Configuración incompleta. Contacta al administrador.")
     return value
 
 
@@ -257,6 +261,51 @@ def build_oracle_results_frame(raw_data_dir: Path) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("match_date").reset_index(drop=True)
 
 
+def _build_settlement_index(results_frame: pd.DataFrame) -> dict[str, list[pd.Series]]:
+    if results_frame.empty:
+        return {}
+
+    indexed_frame = results_frame.copy()
+    indexed_frame["match_date"] = pd.to_datetime(
+        indexed_frame["match_date"],
+        utc=True,
+        errors="coerce",
+    )
+    indexed_frame = indexed_frame.sort_values("match_date")
+
+    settlement_index: dict[str, list[pd.Series]] = {}
+    for _, row in indexed_frame.iterrows():
+        pair_key = row.get("pair_key")
+        if pd.isna(pair_key):
+            continue
+        settlement_index.setdefault(str(pair_key), []).append(row)
+    return settlement_index
+
+
+def _find_settlement_row(
+    match_name: str,
+    created_at: Any,
+    settlement_index: dict[str, list[pd.Series]],
+) -> pd.Series | None:
+    team_parts = [part.strip() for part in str(match_name).split(" vs ")]
+    if len(team_parts) != 2:
+        return None
+    pair_key = "||".join(sorted([normalize_name_key(team_parts[0]), normalize_name_key(team_parts[1])]))
+    candidates = settlement_index.get(pair_key, [])
+    if not candidates:
+        return None
+
+    created_at_ts = pd.to_datetime(created_at, utc=True, errors="coerce")
+    if pd.isna(created_at_ts):
+        return candidates[0]
+
+    for candidate in candidates:
+        match_date = candidate.get("match_date")
+        if pd.notna(match_date) and match_date >= created_at_ts:
+            return candidate
+    return None
+
+
 def settle_legacy_bets(frame: pd.DataFrame, results_frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return frame
@@ -274,28 +323,19 @@ def settle_legacy_bets(frame: pd.DataFrame, results_frame: pd.DataFrame) -> pd.D
         settled["settled_match_date"] = pd.NaT
         return settled
 
+    settlement_index = _build_settlement_index(results_frame)
+
     status_values: list[str] = []
     settled_leagues: list[str | None] = []
     settled_dates: list[pd.Timestamp | None] = []
     for _, row in settled.iterrows():
-        team_parts = [part.strip() for part in str(row["match_name"]).split(" vs ")]
-        if len(team_parts) != 2:
+        match_row = _find_settlement_row(str(row.get("match_name", "")), row.get("created_at"), settlement_index)
+        if match_row is None:
             status_values.append(str(row.get("status", "pending")).lower())
             settled_leagues.append(None)
             settled_dates.append(None)
             continue
-        pair_key = "||".join(sorted([normalize_name_key(team_parts[0]), normalize_name_key(team_parts[1])]))
-        created_at = row["created_at"]
-        candidates = results_frame.loc[results_frame["pair_key"] == pair_key].copy()
-        if pd.notna(created_at):
-            candidates = candidates.loc[candidates["match_date"] >= created_at]
-        candidates = candidates.sort_values("match_date")
-        if candidates.empty:
-            status_values.append(str(row.get("status", "pending")).lower())
-            settled_leagues.append(None)
-            settled_dates.append(None)
-            continue
-        match_row = candidates.iloc[0]
+
         winner = match_row["firstblood_winner"]
         picked_team = str(row["picked_team"]).strip()
         if not winner or pd.isna(winner):
@@ -313,25 +353,6 @@ def settle_legacy_bets(frame: pd.DataFrame, results_frame: pd.DataFrame) -> pd.D
     return settled
 
 
-def _find_settlement_row(
-    match_name: str,
-    created_at: Any,
-    results_frame: pd.DataFrame,
-) -> pd.Series | None:
-    team_parts = [part.strip() for part in str(match_name).split(" vs ")]
-    if len(team_parts) != 2:
-        return None
-    pair_key = "||".join(sorted([normalize_name_key(team_parts[0]), normalize_name_key(team_parts[1])]))
-    candidates = results_frame.loc[results_frame["pair_key"] == pair_key].copy()
-    created_at_ts = pd.to_datetime(created_at, utc=True, errors="coerce")
-    if pd.notna(created_at_ts):
-        candidates = candidates.loc[candidates["match_date"] >= created_at_ts]
-    candidates = candidates.sort_values("match_date")
-    if candidates.empty:
-        return None
-    return candidates.iloc[0]
-
-
 def settle_picks(frame: pd.DataFrame, results_frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return frame
@@ -347,6 +368,7 @@ def settle_picks(frame: pd.DataFrame, results_frame: pd.DataFrame) -> pd.DataFra
     settled["created_at"] = pd.to_datetime(settled["created_at"], utc=True, errors="coerce")
     settled["line"] = pd.to_numeric(settled.get("line"), errors="coerce")
     settled["predicted_value"] = pd.to_numeric(settled.get("predicted_value"), errors="coerce")
+    settlement_index = _build_settlement_index(results_frame)
 
     status_values: list[str] = []
     settled_leagues: list[str | None] = []
@@ -354,7 +376,7 @@ def settle_picks(frame: pd.DataFrame, results_frame: pd.DataFrame) -> pd.DataFra
     settled_actual_values: list[float | str | None] = []
 
     for _, row in settled.iterrows():
-        match_row = _find_settlement_row(str(row.get("match_name", "")), row.get("created_at"), results_frame)
+        match_row = _find_settlement_row(str(row.get("match_name", "")), row.get("created_at"), settlement_index)
         if match_row is None:
             status_values.append(str(row.get("status", "pending")).lower())
             settled_leagues.append(row.get("league"))
@@ -394,12 +416,19 @@ def settle_picks(frame: pd.DataFrame, results_frame: pd.DataFrame) -> pd.DataFra
         elif market == "kills":
             actual_total = pd.to_numeric(match_row.get("total_kills"), errors="coerce")
             line_value = pd.to_numeric(row.get("line"), errors="coerce")
-            actual_value = None if pd.isna(actual_total) else float(actual_total)
-            if pd.isna(actual_total) or pd.isna(line_value):
+            pick_id = row.get("id") or row.get("record_id") or row.name
+            if pd.isna(line_value):
+                logger.error("Kills pick %s has no line value; marking as void.", pick_id)
+                status = "void"
+                actual_value = None
+            elif pd.isna(actual_total):
                 status = "pending"
+                actual_value = None
             elif selection.lower() == "over":
+                actual_value = float(actual_total)
                 status = "won" if float(actual_total) > float(line_value) else "lost" if float(actual_total) < float(line_value) else "void"
             elif selection.lower() == "under":
+                actual_value = float(actual_total)
                 status = "won" if float(actual_total) < float(line_value) else "lost" if float(actual_total) > float(line_value) else "void"
             else:
                 status = "pending"
