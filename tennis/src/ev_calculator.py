@@ -163,16 +163,24 @@ def name_score(api_name: object, sackmann_name: object) -> float:
     return max(token_overlap, last_name_score, initial_score)
 
 
-def build_latest_player_state(features: pd.DataFrame) -> pd.DataFrame:
+def build_latest_player_state(
+    features: pd.DataFrame,
+    surface: str | None = None,
+    *,
+    by_surface: bool = False,
+) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     features = features.copy()
     features["fecha"] = pd.to_datetime(features["fecha"], errors="coerce")
+    if surface is not None and "surface" in features.columns:
+        features = features.loc[features["surface"].astype(str).eq(surface)].copy()
     features = features.sort_values("fecha")
 
     for _, row in features.iterrows():
         rows.append(
             {
                 "fecha": row["fecha"],
+                "surface": row.get("surface"),
                 "player_name": row["jugador_a"],
                 "serve_points_won_pct_last20": row["jugador_a_serve_points_won_pct_last20"],
                 "return_points_won_pct_last20": row["jugador_a_return_points_won_pct_last20"],
@@ -183,6 +191,7 @@ def build_latest_player_state(features: pd.DataFrame) -> pd.DataFrame:
         rows.append(
             {
                 "fecha": row["fecha"],
+                "surface": row.get("surface"),
                 "player_name": row["jugador_b"],
                 "serve_points_won_pct_last20": row["jugador_b_serve_points_won_pct_last20"],
                 "return_points_won_pct_last20": row["jugador_b_return_points_won_pct_last20"],
@@ -192,10 +201,13 @@ def build_latest_player_state(features: pd.DataFrame) -> pd.DataFrame:
         )
 
     player_state = pd.DataFrame(rows)
+    if player_state.empty:
+        return player_state
     player_state["normalized_name"] = player_state["player_name"].map(normalize_name)
+    subset = ["normalized_name", "surface"] if by_surface and "surface" in player_state.columns else ["normalized_name"]
     return (
         player_state.sort_values("fecha")
-        .drop_duplicates(subset=["normalized_name"], keep="last")
+        .drop_duplicates(subset=subset, keep="last")
         .reset_index(drop=True)
     )
 

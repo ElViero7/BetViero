@@ -80,6 +80,7 @@ def build_player_match_rows(matches: pd.DataFrame) -> pd.DataFrame:
             "fecha": matches["fecha"],
             "tourney_id": matches["tourney_id"],
             "match_num": matches["match_num"],
+            "surface": matches["surface"],
             "player_id": matches["winner_id"],
             "player_name": matches["winner_name"],
             "opponent_id": matches["loser_id"],
@@ -98,6 +99,7 @@ def build_player_match_rows(matches: pd.DataFrame) -> pd.DataFrame:
             "fecha": matches["fecha"],
             "tourney_id": matches["tourney_id"],
             "match_num": matches["match_num"],
+            "surface": matches["surface"],
             "player_id": matches["loser_id"],
             "player_name": matches["loser_name"],
             "opponent_id": matches["winner_id"],
@@ -127,15 +129,16 @@ def build_player_match_rows(matches: pd.DataFrame) -> pd.DataFrame:
 
 def add_no_leakage_player_features(player_rows: pd.DataFrame) -> pd.DataFrame:
     featured = player_rows.copy()
-    grouped = featured.groupby("player_id", group_keys=False)
+    grouped_by_player_surface = featured.groupby(["player_id", "surface"], group_keys=False)
+    grouped_by_player = featured.groupby("player_id", group_keys=False)
 
-    featured["serve_points_won_pct_last20"] = grouped["serve_points_won_pct_match"].transform(
+    featured["serve_points_won_pct_last20"] = grouped_by_player_surface["serve_points_won_pct_match"].transform(
         lambda series: series.shift(1).rolling(ROLLING_WINDOW, min_periods=3).mean()
     )
-    featured["return_points_won_pct_last20"] = grouped["return_points_won_pct_match"].transform(
+    featured["return_points_won_pct_last20"] = grouped_by_player_surface["return_points_won_pct_match"].transform(
         lambda series: series.shift(1).rolling(ROLLING_WINDOW, min_periods=3).mean()
     )
-    featured["dias_desde_ultimo_partido"] = grouped["fecha"].diff().dt.days
+    featured["dias_desde_ultimo_partido"] = grouped_by_player["fecha"].diff().dt.days
     featured["returning_from_injury"] = (featured["dias_desde_ultimo_partido"] > 45).astype(int)
     featured["minutos_acumulados_torneo"] = (
         featured.groupby(["player_id", "tourney_id"], group_keys=False)["minutes"]

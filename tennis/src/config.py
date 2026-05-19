@@ -92,6 +92,7 @@ class TennisOddsApiConfig:
     base_url: str
     sport_key: str
     regions: str
+    bookmakers: str
     markets: str
     odds_format: str
     timeout_seconds: float
@@ -112,6 +113,7 @@ class TennisOddsApiConfig:
             base_url=os.getenv("THE_ODDS_API_BASE_URL", "https://api.the-odds-api.com/v4").rstrip("/"),
             sport_key=os.getenv("TENNIS_ODDS_SPORT_KEY", "tennis_atp").strip() or "tennis_atp",
             regions=os.getenv("TENNIS_ODDS_REGIONS", "eu,uk,us").strip() or "eu,uk,us",
+            bookmakers=os.getenv("TENNIS_ODDS_BOOKMAKERS", "pinnacle").strip(),
             markets=os.getenv("TENNIS_ODDS_MARKETS", "totals,spreads").strip() or "totals,spreads",
             odds_format=os.getenv("TENNIS_ODDS_FORMAT", "decimal").strip() or "decimal",
             timeout_seconds=float(os.getenv("THE_ODDS_API_TIMEOUT_SECONDS", "30")),

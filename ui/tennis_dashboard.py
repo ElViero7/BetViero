@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -10,8 +11,24 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 
-from tennis.src.db import update_tennis_row
-from tennis.src.ev_calculator import get_supabase_client
+from tennis.src.ev_calculator import (
+    build_latest_player_state,
+    build_simulation_row,
+    get_supabase_client,
+    name_score,
+    probability_from_distribution,
+)
+from tennis.src.service import (
+    build_tennis_best_market_odds,
+    build_tennis_odds_tracking_frame,
+    calculate_tennis_kelly_values,
+    capture_pinnacle_clv_for_bet,
+    insert_tennis_bet_log,
+    load_tennis_clv_pending_bets,
+    record_manual_clv_for_bet,
+    settle_tennis_bet,
+)
+from tennis.src.simulator import calculate_match_serve_probs, run_monte_carlo
 
 
 load_dotenv()
@@ -47,6 +64,7 @@ TENNIS_SECRET_KEYS = [
     "THE_ODDS_API_TIMEOUT_SECONDS",
     "TENNIS_ODDS_SPORT_KEY",
     "TENNIS_ODDS_REGIONS",
+    "TENNIS_ODDS_BOOKMAKERS",
     "TENNIS_ODDS_MARKETS",
     "TENNIS_ODDS_FORMAT",
 ]
@@ -232,10 +250,23 @@ def load_tennis_bets_log() -> pd.DataFrame:
     if frame.empty:
         return frame
 
-    for column in ["line", "my_odd", "model_probability", "model_fair_odd", "edge", "ev", "stake", "kelly_fraction", "pnl"]:
+    for column in [
+        "line",
+        "my_odd",
+        "model_probability",
+        "model_fair_odd",
+        "edge",
+        "ev",
+        "stake",
+        "kelly_fraction",
+        "pnl",
+        "clv_pinnacle_odd",
+        "clv_edge",
+        "clv_value",
+    ]:
         if column in frame.columns:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
-    for column in ["placed_at", "event_time", "settled_at", "created_at", "updated_at"]:
+    for column in ["placed_at", "event_time", "settled_at", "clv_captured_at", "created_at", "updated_at"]:
         if column in frame.columns:
             frame[column] = pd.to_datetime(frame[column], errors="coerce")
     frame["partido"] = frame["player_1"].fillna("") + " vs " + frame["player_2"].fillna("")
@@ -254,64 +285,6 @@ def load_tennis_bets_log() -> pd.DataFrame:
         + frame["my_odd"].map(lambda value: "-" if pd.isna(value) else f"{value:.2f}")
     )
     return frame
-
-
-def settle_tennis_bet(bet_id: str, status: str, result_selection: str | None = None) -> None:
-    bets = load_tennis_bets_log()
-    if bets.empty:
-        raise ValueError("No hay apuestas cargadas.")
-
-    row = bets.loc[bets["id"].eq(bet_id)]
-    if row.empty:
-        raise ValueError("No encontre la apuesta seleccionada.")
-
-    bet = row.iloc[0]
-    stake = float(bet["stake"])
-    odd = float(bet["my_odd"])
-    if status == "won":
-        pnl = stake * (odd - 1.0)
-    elif status == "lost":
-        pnl = -stake
-    elif status == "void":
-        pnl = 0.0
-    else:
-        raise ValueError(f"Estado no soportado: {status}")
-
-    payload = {
-        "status": status,
-        "result_selection": result_selection or None,
-        "pnl": pnl,
-        "settled_at": pd.Timestamp.utcnow().isoformat(),
-    }
-    update_tennis_row("bets_log", bet_id, payload)
-
-
-def build_tennis_best_market_odds(frame: pd.DataFrame) -> pd.DataFrame:
-    if frame.empty:
-        return pd.DataFrame()
-
-    sort_columns = ["external_event_id", "market_key", "selection", "line", "price"]
-    best_rows = (
-        frame.sort_values(sort_columns, ascending=[True, True, True, True, False], na_position="first")
-        .drop_duplicates(subset=["external_event_id", "market_key", "selection", "line"], keep="first")
-        .copy()
-    )
-    grouped = frame.groupby(["external_event_id", "market_key", "selection", "line"], dropna=False)
-    summary = grouped.agg(
-        casas=("bookmaker_key", "nunique"),
-        min_cuota=("price", "min"),
-        max_cuota=("price", "max"),
-        ultima_actualizacion=("collected_at", "max"),
-    ).reset_index()
-
-    output = best_rows.merge(
-        summary,
-        on=["external_event_id", "market_key", "selection", "line"],
-        how="left",
-        suffixes=("", "_summary"),
-    )
-    output["rango_cuotas"] = output["max_cuota"] - output["min_cuota"]
-    return output.sort_values(["commence_time", "match_label", "market_key", "selection", "line"]).reset_index(drop=True)
 
 
 def parse_tennis_value_market(mercado: object) -> tuple[str | None, str | None]:
@@ -424,95 +397,294 @@ def split_tennis_match_name(match_name: object) -> tuple[str, str]:
     return player_1.strip(), player_2.strip()
 
 
-def calculate_tennis_kelly_values(probability: float, decimal_odd: float, bankroll: float, multiplier: float) -> tuple[float, float, float]:
+def match_manual_player(raw_name: str, players: list[str], min_score: float = 0.72) -> tuple[str | None, float]:
+    best_player: str | None = None
+    best_score = 0.0
+    for player in players:
+        score = name_score(raw_name, player)
+        if score > best_score:
+            best_score = score
+            best_player = player
+    if best_score < min_score:
+        return None, best_score
+    return best_player, best_score
+
+
+def parse_match_odd_line(line_text: str) -> dict[str, object]:
+    parts = [part.strip() for part in line_text.split("|")]
+    if len(parts) != 2:
+        raise ValueError("Formato esperado: Over 22.5 | 1.91 o Jugador -2.5 | 1.87")
+
+    market_text, odd_text = parts
+    odd = float(odd_text.replace(",", "."))
+    if odd <= 1.0:
+        raise ValueError("La cuota debe ser mayor que 1.0.")
+
+    totals_match = re.fullmatch(r"(over|under)\s+(-?\d+(?:[\.,]\d+)?)", market_text, flags=re.IGNORECASE)
+    if totals_match:
+        selection = totals_match.group(1).title()
+        line = float(totals_match.group(2).replace(",", "."))
+        return {
+            "market_type": "Totales",
+            "selection": selection,
+            "line": line,
+            "odd": odd,
+        }
+
+    handicap_match = re.fullmatch(r"(.+?)\s+([+-]?\d+(?:[\.,]\d+)?)", market_text, flags=re.IGNORECASE)
+    if handicap_match:
+        selection = handicap_match.group(1).strip()
+        line = float(handicap_match.group(2).replace(",", "."))
+        return {
+            "market_type": "Handicap",
+            "selection": selection,
+            "line": line,
+            "odd": odd,
+        }
+
+    raise ValueError("Mercado no reconocido. Usa `Over 22.5`, `Under 22.5` o `Jugador -2.5`.")
+
+
+def build_manual_pick_candidate(
+    *,
+    features: pd.DataFrame,
+    player_a: str,
+    player_b: str,
+    surface: str,
+    best_of: int,
+    n_simulations: int,
+    market_type: str,
+    selection: str,
+    line: float,
+    decimal_odd: float,
+    bookmaker: str = "Manual",
+    source_tag: str = "manual_text",
+) -> dict[str, object]:
+    latest_state = build_latest_player_state(features, surface=surface)
+    state_surface = surface
+    player_a_rows = latest_state.loc[latest_state["player_name"].astype(str).eq(player_a)] if not latest_state.empty else pd.DataFrame()
+    player_b_rows = latest_state.loc[latest_state["player_name"].astype(str).eq(player_b)] if not latest_state.empty else pd.DataFrame()
+    if player_a_rows.empty or player_b_rows.empty:
+        latest_state = build_latest_player_state(features)
+        state_surface = "global"
+        player_a_rows = latest_state.loc[latest_state["player_name"].astype(str).eq(player_a)]
+        player_b_rows = latest_state.loc[latest_state["player_name"].astype(str).eq(player_b)]
+    if player_a_rows.empty or player_b_rows.empty:
+        raise ValueError("No encontre estado historico suficiente para uno de los jugadores.")
+
+    player_a_state = player_a_rows.iloc[0]
+    player_b_state = player_b_rows.iloc[0]
+    simulation_row = build_simulation_row(player_a_state, player_b_state)
+    p_serve_a, p_serve_b = calculate_match_serve_probs(simulation_row)
+    simulation = run_monte_carlo(
+        p_serve_A=p_serve_a,
+        p_serve_B=p_serve_b,
+        best_of=int(best_of),
+        n_simulations=int(n_simulations),
+    )
+
+    if market_type == "Totales":
+        total_distribution = simulation["total_games_distribution"]
+        if selection == "Over":
+            probability = probability_from_distribution(total_distribution, lambda total: total > line)
+        elif selection == "Under":
+            probability = probability_from_distribution(total_distribution, lambda total: total < line)
+        else:
+            raise ValueError(f"Seleccion de totales no soportada: {selection}")
+        market_label = f"{selection} {line:g}"
+        stored_market = selection
+    else:
+        diff_distribution = simulation["game_diff_distribution"]
+        matched_selection, selection_score = match_manual_player(selection, [player_a, player_b], min_score=0.50)
+        if matched_selection is None:
+            raise ValueError(f"No pude asociar el handicap `{selection}` a {player_a} o {player_b}. Score: {selection_score:.2f}")
+        if matched_selection == player_a:
+            probability = probability_from_distribution(diff_distribution, lambda diff: diff > -line)
+        else:
+            probability = probability_from_distribution(diff_distribution, lambda diff: diff < line)
+        market_label = f"{matched_selection} {line:+g}"
+        stored_market = f"Handicap {matched_selection}"
+
     ev = probability * decimal_odd - 1.0
-    full_kelly_fraction = ev / (decimal_odd - 1.0) if decimal_odd > 1.0 else 0.0
-    applied_fraction = max(0.0, full_kelly_fraction * multiplier)
-    stake = bankroll * applied_fraction
-    return ev, applied_fraction, stake
-
-
-def insert_tennis_bet_log(row: pd.Series, *, bet_type: str, odd: float, stake: float, kelly_fraction: float, notes: str) -> None:
-    player_1, player_2 = split_tennis_match_name(row.get("partido"))
-    market_key, selection = parse_tennis_value_market(row.get("mercado"))
-    probability = float(row.get("nuestra_prob"))
-    ev = probability * odd - 1.0
-    payload = {
-        "tennis_pick_id": None if pd.isna(row.get("tennis_pick_id")) else str(row.get("tennis_pick_id")),
-        "source": "streamlit_value_bet",
-        "bet_type": bet_type,
-        "player_1": player_1,
-        "player_2": player_2,
-        "market_key": market_key or str(row.get("mercado") or ""),
-        "selection": selection or str(row.get("mercado") or ""),
-        "line": None if pd.isna(row.get("linea")) else float(row.get("linea")),
-        "bookmaker_key": str(row.get("mejor_bookmaker_key_actual") or row.get("mejor_casa_actual") or row.get("casa_apuestas") or ""),
-        "my_odd": float(odd),
-        "model_probability": probability,
-        "model_fair_odd": 1.0 / probability if probability > 0 else None,
-        "edge": probability - (1.0 / odd),
-        "ev": ev,
-        "stake": float(stake),
-        "kelly_fraction": float(kelly_fraction),
-        "status": "pending",
-        "notes": notes.strip() or None,
-        "raw_payload": {
-            "partido": row.get("partido"),
-            "mercado": row.get("mercado"),
-            "cuota_casa_csv": None if pd.isna(row.get("cuota_casa")) else float(row.get("cuota_casa")),
-            "casa_apuestas_csv": row.get("casa_apuestas"),
-            "mejor_cuota_actual": None if pd.isna(row.get("mejor_cuota_actual")) else float(row.get("mejor_cuota_actual")),
-            "mejor_casa_actual": row.get("mejor_casa_actual"),
-            "tennis_pick_id": None if pd.isna(row.get("tennis_pick_id")) else str(row.get("tennis_pick_id")),
-            "tennis_pick_fecha": None if pd.isna(row.get("tennis_pick_fecha")) else str(row.get("tennis_pick_fecha")),
-            "ev_csv": None if pd.isna(row.get("EV")) else float(row.get("EV")),
-            "ev_actual": None if pd.isna(row.get("EV Actual")) else float(row.get("EV Actual")),
-        },
+    fair_odd = 1.0 / probability if probability > 0 else None
+    edge = probability - (1.0 / decimal_odd)
+    bookmaker_key = re.sub(r"[^a-z0-9]+", "_", bookmaker.lower()).strip("_") or "manual"
+    return {
+        "partido": f"{player_a} vs {player_b}",
+        "player_a": player_a,
+        "player_b": player_b,
+        "superficie": surface,
+        "source_surface": state_surface,
+        "mercado": stored_market,
+        "market_label": market_label,
+        "linea": float(line),
+        "casa_apuestas": bookmaker,
+        "mejor_bookmaker_key_actual": bookmaker_key,
+        "mejor_casa_actual": bookmaker,
+        "cuota_casa": float(decimal_odd),
+        "nuestra_prob": float(probability),
+        "EV": float(ev),
+        "EV Actual": float(ev),
+        "model_fair_odd": None if fair_odd is None else float(fair_odd),
+        "edge": float(edge),
+        "p_serve_A": float(p_serve_a),
+        "p_serve_B": float(p_serve_b),
+        "mean_total_games": float(simulation["mean_total_games"]),
+        "mean_game_diff": float(simulation["mean_game_diff"]),
+        "win_probability_A": float(simulation["win_probability_A"]),
+        "win_probability_B": float(simulation["win_probability_B"]),
+        "best_of": int(best_of),
+        "n_simulations": int(n_simulations),
+        "source_tag": source_tag,
     }
-    (
-        get_supabase_client()
-        .schema("tennis")
-        .table("bets_log")
-        .insert(payload)
-        .execute()
+
+
+def render_cazador_manual_match_odds(
+    *,
+    features: pd.DataFrame,
+    player_a: str,
+    player_b: str,
+    surface: str,
+    best_of: int,
+    n_simulations: int,
+) -> None:
+    st.subheader("Cuotas del partido")
+    st.markdown("Formato por linea: `Over 22.5 | 1.91`, `Under 22.5 | 1.91` o `Sinner -2.5 | 1.87`.")
+
+    bookmaker = st.text_input("Casa para estas cuotas", value="Manual")
+    raw_text = st.text_area(
+        "Pega solo cuotas de este partido",
+        height=180,
+        placeholder="Over 22.5 | 1.91\nUnder 22.5 | 1.91\nSinner -2.5 | 1.87\nFils +2.5 | 1.87",
     )
 
+    if st.button("Escanear cuotas del partido", use_container_width=True):
+        candidates: list[dict[str, object]] = []
+        errors: list[dict[str, object]] = []
+        for line_number, raw_line in enumerate(raw_text.splitlines(), start=1):
+            clean_line = raw_line.strip()
+            if not clean_line:
+                continue
+            try:
+                parsed = parse_match_odd_line(clean_line)
+                candidate = build_manual_pick_candidate(
+                    features=features,
+                    player_a=player_a,
+                    player_b=player_b,
+                    surface=surface,
+                    best_of=int(best_of),
+                    n_simulations=int(n_simulations),
+                    market_type=str(parsed["market_type"]),
+                    selection=str(parsed["selection"]),
+                    line=float(parsed["line"]),
+                    decimal_odd=float(parsed["odd"]),
+                    bookmaker=bookmaker,
+                    source_tag="manual_match_text",
+                )
+                candidate["linea_texto"] = line_number
+                candidate["texto_original"] = clean_line
+                candidates.append(candidate)
+            except Exception as exc:
+                errors.append({"linea": line_number, "texto": clean_line, "error": str(exc)})
 
-def build_tennis_odds_tracking_frame() -> pd.DataFrame:
-    picks = load_tennis_picks_history()
-    history = load_tennis_pick_odds_history()
-    if picks.empty or history.empty:
-        return pd.DataFrame()
+        st.session_state["tennis_manual_match_candidates"] = candidates
+        st.session_state["tennis_manual_match_errors"] = errors
 
-    tracking = history.merge(
-        picks,
-        left_on="pick_id",
-        right_on="id",
-        how="left",
-        suffixes=("_snapshot", "_pick"),
+    errors = st.session_state.get("tennis_manual_match_errors", [])
+    if errors:
+        st.warning(f"Lineas con error: {len(errors)}")
+        st.dataframe(pd.DataFrame(errors), use_container_width=True, hide_index=True)
+
+    candidates = st.session_state.get("tennis_manual_match_candidates", [])
+    if not candidates:
+        return
+
+    results = pd.DataFrame(candidates)
+    for column in ["cuota_casa", "nuestra_prob", "EV", "edge", "linea", "model_fair_odd", "mean_total_games", "mean_game_diff"]:
+        if column in results.columns:
+            results[column] = pd.to_numeric(results[column], errors="coerce")
+    results = results.sort_values("EV", ascending=False).reset_index(drop=True)
+
+    st.subheader("Resultados de cuotas")
+    display_columns = [
+        "linea_texto",
+        "partido",
+        "superficie",
+        "mercado",
+        "linea",
+        "cuota_casa",
+        "nuestra_prob",
+        "model_fair_odd",
+        "EV",
+        "edge",
+        "source_surface",
+    ]
+    st.dataframe(
+        results[[column for column in display_columns if column in results.columns]].style.format(
+            {
+                "linea": "{:.1f}",
+                "cuota_casa": "{:.2f}",
+                "nuestra_prob": "{:.2%}",
+                "model_fair_odd": "{:.2f}",
+                "EV": "{:.2%}",
+                "edge": "{:.2%}",
+            },
+            na_rep="-",
+        ),
+        use_container_width=True,
+        hide_index=True,
     )
-    if tracking.empty:
-        return tracking
 
-    for column in ["cuota", "ev_momento", "linea", "cuota_inicial", "nuestra_prob", "ev_inicial"]:
-        if column in tracking.columns:
-            tracking[column] = pd.to_numeric(tracking[column], errors="coerce")
+    ev_positive = results.loc[results["EV"].fillna(-1) > 0].copy()
+    if ev_positive.empty:
+        st.info("No hay picks EV+ en el texto escaneado.")
+        return
 
-    for column in ["fecha_registro_snapshot", "fecha_registro_pick"]:
-        if column in tracking.columns:
-            tracking[column] = pd.to_datetime(tracking[column], errors="coerce")
+    labels = [
+        f"{int(row.linea_texto)} | {row.partido} | {row.mercado} {row.linea:g} | cuota {row.cuota_casa:.2f} | EV {row.EV:.2%}"
+        for row in ev_positive.itertuples()
+    ]
+    selected_labels = st.multiselect("EV+ a guardar", labels, default=labels)
+    selected_line_numbers = {int(label.split("|", 1)[0].strip()) for label in selected_labels}
 
-    tracking["linea_label"] = tracking["linea"].map(lambda value: "-" if pd.isna(value) else f"{value:g}")
-    tracking["pick_label"] = (
-        tracking["partido"].fillna("Sin partido")
-        + " | "
-        + tracking["mercado"].fillna("Sin mercado")
-        + " "
-        + tracking["linea_label"]
-        + " | "
-        + tracking["casa_apuestas"].fillna("Sin casa")
-    )
-    return tracking.sort_values(["pick_label", "fecha_registro_snapshot"]).reset_index(drop=True)
+    with st.form("tennis_manual_match_save_form", clear_on_submit=False):
+        form_col_1, form_col_2, form_col_3 = st.columns(3)
+        bet_type = form_col_1.selectbox("Tipo", ["paper", "real"])
+        bankroll = form_col_2.number_input("Bankroll", min_value=0.0, value=1000.0, step=50.0)
+        kelly_multiplier = form_col_3.selectbox("Kelly", [0.25, 0.5, 1.0], format_func=lambda value: f"{value:g}x")
+        notes = st.text_area("Notas", value="Pick manual por texto para iniciar tracking CLV.")
+        save_batch = st.form_submit_button("Guardar EV+ seleccionados", use_container_width=True)
+
+    if save_batch:
+        saved = 0
+        failed: list[dict[str, object]] = []
+        selected_rows = ev_positive.loc[ev_positive["linea_texto"].isin(selected_line_numbers)]
+        for _, row in selected_rows.iterrows():
+            try:
+                ev_value, applied_kelly_fraction, recommended_stake = calculate_tennis_kelly_values(
+                    float(row["nuestra_prob"]),
+                    float(row["cuota_casa"]),
+                    bankroll,
+                    kelly_multiplier,
+                )
+                insert_tennis_bet_log(
+                    row,
+                    bet_type=bet_type,
+                    odd=float(row["cuota_casa"]),
+                    stake=float(round(recommended_stake, 2)),
+                    kelly_fraction=float(applied_kelly_fraction),
+                    notes=notes,
+                    source="streamlit_manual_match_text",
+                )
+                saved += 1
+            except Exception as exc:
+                failed.append({"linea": row.get("linea_texto"), "partido": row.get("partido"), "error": str(exc)})
+        load_tennis_bets_log.clear()
+        if saved:
+            st.success(f"Picks guardados: {saved}")
+        if failed:
+            st.error("Algunos picks no se pudieron guardar.")
+            st.dataframe(pd.DataFrame(failed), use_container_width=True, hide_index=True)
 
 
 def render_tennis_live_hunter() -> None:
@@ -661,6 +833,230 @@ def render_tennis_live_hunter() -> None:
     )
     st.dataframe(styled, use_container_width=True, hide_index=True)
     render_tennis_bet_registration(value_bets)
+
+
+def render_cazador_manual() -> None:
+    st.subheader("Cazador Manual")
+
+    features = load_tennis_csv(str(TENNIS_FEATURES_PATH))
+    if features.empty:
+        st.warning("Falta el CSV de features avanzadas. Ejecuta primero `Procesar Cansancio y Features`.")
+        return
+
+    required_columns = {"fecha", "surface", "jugador_a", "jugador_b"}
+    missing_columns = sorted(required_columns - set(features.columns))
+    if missing_columns:
+        st.error(f"Faltan columnas necesarias en features: {', '.join(missing_columns)}")
+        return
+
+    players = sorted(
+        pd.concat([features["jugador_a"], features["jugador_b"]])
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+    if len(players) < 2:
+        st.warning("No hay suficientes jugadores en el dataset de features.")
+        return
+
+    col_player_a, col_player_b = st.columns(2)
+    player_a = col_player_a.selectbox("Jugador A", players, index=0)
+    player_b = col_player_b.selectbox("Jugador B", players, index=1)
+
+    col_surface, col_best_of, col_sims = st.columns(3)
+    surface = col_surface.selectbox("Superficie", ["Hard", "Clay", "Grass"])
+    best_of = col_best_of.selectbox("Formato", [3, 5], index=0, format_func=lambda value: f"Best of {value}")
+    n_simulations = col_sims.number_input(
+        "Simulaciones",
+        min_value=500,
+        max_value=20000,
+        value=3000,
+        step=500,
+    )
+
+    col_market, col_selection, col_line, col_odd = st.columns(4)
+    market_type = col_market.selectbox("Mercado", ["Totales", "Handicap"])
+    if market_type == "Totales":
+        selection = col_selection.selectbox("Seleccion", ["Over", "Under"])
+        default_line = 22.5
+        min_line = 10.5
+        max_line = 60.5
+    else:
+        selection = col_selection.selectbox("Seleccion", [player_a, player_b])
+        default_line = -2.5 if selection == player_a else 2.5
+        min_line = -20.5
+        max_line = 20.5
+
+    line = col_line.number_input("Linea", min_value=min_line, max_value=max_line, value=default_line, step=0.5)
+    decimal_odd = col_odd.number_input("Cuota Decimal", min_value=1.01, max_value=20.0, value=1.85, step=0.01)
+
+    if player_a == player_b:
+        st.warning("Selecciona dos jugadores distintos.")
+        return
+
+    render_cazador_manual_match_odds(
+        features=features,
+        player_a=player_a,
+        player_b=player_b,
+        surface=surface,
+        best_of=int(best_of),
+        n_simulations=int(n_simulations),
+    )
+
+    simulate_pressed = st.button("Simular Partido", use_container_width=True)
+    if simulate_pressed:
+        latest_state = build_latest_player_state(features, surface=surface)
+        if latest_state.empty:
+            st.info("No hay historico suficiente en esa superficie; uso el estado global mas reciente.")
+            latest_state = build_latest_player_state(features)
+
+        player_a_rows = latest_state.loc[latest_state["player_name"].astype(str).eq(player_a)]
+        player_b_rows = latest_state.loc[latest_state["player_name"].astype(str).eq(player_b)]
+        state_surface = surface
+        if player_a_rows.empty or player_b_rows.empty:
+            st.info("No hay estado especifico de esa superficie para ambos jugadores; uso el estado global mas reciente.")
+            latest_state = build_latest_player_state(features)
+            player_a_rows = latest_state.loc[latest_state["player_name"].astype(str).eq(player_a)]
+            player_b_rows = latest_state.loc[latest_state["player_name"].astype(str).eq(player_b)]
+            state_surface = "global"
+        if player_a_rows.empty or player_b_rows.empty:
+            st.error("No encontre estado historico suficiente para uno de los jugadores.")
+            return
+
+        player_a_state = player_a_rows.iloc[0]
+        player_b_state = player_b_rows.iloc[0]
+        simulation_row = build_simulation_row(player_a_state, player_b_state)
+        p_serve_a, p_serve_b = calculate_match_serve_probs(simulation_row)
+        simulation = run_monte_carlo(
+            p_serve_A=p_serve_a,
+            p_serve_B=p_serve_b,
+            best_of=int(best_of),
+            n_simulations=int(n_simulations),
+        )
+
+        if market_type == "Totales":
+            total_distribution = simulation["total_games_distribution"]
+            if selection == "Over":
+                probability = probability_from_distribution(total_distribution, lambda total: total > line)
+            else:
+                probability = probability_from_distribution(total_distribution, lambda total: total < line)
+            market_label = f"{selection} {line:g}"
+            stored_market = selection
+        else:
+            diff_distribution = simulation["game_diff_distribution"]
+            if selection == player_a:
+                probability = probability_from_distribution(diff_distribution, lambda diff: diff > -line)
+            else:
+                probability = probability_from_distribution(diff_distribution, lambda diff: diff < line)
+            market_label = f"{selection} {line:+g}"
+            stored_market = f"Handicap {selection}"
+
+        ev = probability * decimal_odd - 1.0
+        fair_odd = 1.0 / probability if probability > 0 else None
+        edge = probability - (1.0 / decimal_odd)
+        st.session_state["tennis_manual_pick_candidate"] = {
+            "partido": f"{player_a} vs {player_b}",
+            "player_a": player_a,
+            "player_b": player_b,
+            "superficie": surface,
+            "source_surface": state_surface,
+            "mercado": stored_market,
+            "market_label": market_label,
+            "linea": float(line),
+            "casa_apuestas": "Manual",
+            "mejor_bookmaker_key_actual": "manual",
+            "mejor_casa_actual": "Manual",
+            "cuota_casa": float(decimal_odd),
+            "nuestra_prob": float(probability),
+            "EV": float(ev),
+            "EV Actual": float(ev),
+            "model_fair_odd": None if fair_odd is None else float(fair_odd),
+            "edge": float(edge),
+            "p_serve_A": float(p_serve_a),
+            "p_serve_B": float(p_serve_b),
+            "mean_total_games": float(simulation["mean_total_games"]),
+            "mean_game_diff": float(simulation["mean_game_diff"]),
+            "win_probability_A": float(simulation["win_probability_A"]),
+            "win_probability_B": float(simulation["win_probability_B"]),
+            "best_of": int(best_of),
+            "n_simulations": int(n_simulations),
+        }
+
+    candidate = st.session_state.get("tennis_manual_pick_candidate")
+    if not candidate:
+        return
+
+    probability = float(candidate["nuestra_prob"])
+    decimal_odd = float(candidate["cuota_casa"])
+    ev = float(candidate["EV"])
+    fair_odd = candidate.get("model_fair_odd")
+    edge = float(candidate["edge"])
+    p_serve_a = float(candidate["p_serve_A"])
+    p_serve_b = float(candidate["p_serve_B"])
+
+    metric_1, metric_2, metric_3, metric_4 = st.columns(4)
+    metric_1.metric("Prob modelo", f"{probability:.2%}")
+    metric_2.metric("Cuota justa", "-" if fair_odd is None else f"{fair_odd:.2f}")
+    metric_3.metric("EV", f"{ev:.2%}")
+    metric_4.metric("Edge", f"{edge:.2%}")
+
+    detail_1, detail_2, detail_3, detail_4 = st.columns(4)
+    detail_1.metric("P saque A", f"{p_serve_a:.2%}")
+    detail_2.metric("P saque B", f"{p_serve_b:.2%}")
+    detail_3.metric("Juegos medios", f"{float(candidate['mean_total_games']):.2f}")
+    detail_4.metric("Diff medio A-B", f"{float(candidate['mean_game_diff']):.2f}")
+
+    result_payload = {
+        "partido": candidate["partido"],
+        "superficie": candidate["superficie"],
+        "mercado": candidate["mercado"],
+        "seleccion": candidate["market_label"],
+        "cuota_manual": float(decimal_odd),
+        "nuestra_prob": float(probability),
+        "cuota_justa": None if fair_odd is None else float(fair_odd),
+        "ev": float(ev),
+        "win_probability_A": float(candidate["win_probability_A"]),
+        "win_probability_B": float(candidate["win_probability_B"]),
+    }
+    st.json(result_payload)
+
+    if ev > 0:
+        st.success("Value bet detectada con la cuota introducida.")
+        with st.form("tennis_manual_pick_save_form", clear_on_submit=False):
+            form_col_1, form_col_2, form_col_3 = st.columns(3)
+            bet_type = form_col_1.selectbox("Tipo", ["paper", "real"])
+            bankroll = form_col_2.number_input("Bankroll", min_value=0.0, value=1000.0, step=50.0)
+            kelly_multiplier = form_col_3.selectbox("Kelly", [0.25, 0.5, 1.0], format_func=lambda value: f"{value:g}x")
+            manual_ev, applied_kelly_fraction, recommended_stake = calculate_tennis_kelly_values(
+                probability,
+                decimal_odd,
+                bankroll,
+                kelly_multiplier,
+            )
+            st.metric("Stake Kelly recomendado", f"{recommended_stake:.2f}")
+            stake = st.number_input("Stake a guardar", min_value=0.0, value=float(round(recommended_stake, 2)), step=1.0)
+            notes = st.text_area("Notas", value="Pick manual para iniciar tracking CLV.")
+            save_manual_pick = st.form_submit_button("💾 Guardar Pick (Iniciar tracking CLV)", use_container_width=True)
+
+        if save_manual_pick:
+            try:
+                stored_row = pd.Series(candidate)
+                insert_tennis_bet_log(
+                    stored_row,
+                    bet_type=bet_type,
+                    odd=decimal_odd,
+                    stake=float(stake),
+                    kelly_fraction=float(stake / bankroll) if bankroll > 0 else float(applied_kelly_fraction),
+                    notes=notes,
+                    source="streamlit_manual_pick",
+                )
+                load_tennis_bets_log.clear()
+                st.success("Pick manual guardado en tennis.bets_log.")
+            except Exception as exc:
+                st.error(f"No pude guardar el pick manual: {exc}")
+    else:
+        st.info("No hay value contra la cuota introducida.")
 
 
 def render_tennis_bet_registration(value_bets: pd.DataFrame) -> None:
@@ -940,6 +1336,124 @@ def render_tennis_odds_tracking() -> None:
     )
 
 
+def render_tennis_clv_tracker() -> None:
+    st.subheader("Tracker CLV")
+    st.caption("Manual para picks del cazador manual; API Pinnacle para picks con cobertura de The Odds API.")
+
+    if st.button("Refrescar pendientes CLV", use_container_width=False):
+        load_tennis_bets_log.clear()
+
+    try:
+        pending = load_tennis_clv_pending_bets()
+    except Exception as exc:
+        st.error(f"No pude cargar pendientes CLV: {exc}")
+        return
+
+    if pending.empty:
+        st.info("No hay picks pendientes de CLV.")
+        return
+
+    for column in ["placed_at", "event_time"]:
+        if column in pending.columns:
+            pending[column] = pd.to_datetime(pending[column], errors="coerce")
+    for column in ["line", "my_odd", "model_probability", "ev", "stake"]:
+        if column in pending.columns:
+            pending[column] = pd.to_numeric(pending[column], errors="coerce")
+
+    metric_1, metric_2, metric_3 = st.columns(3)
+    metric_1.metric("Pendientes CLV", len(pending))
+    metric_2.metric("Stake pendiente", f"{float(pending.get('stake', pd.Series(dtype=float)).fillna(0).sum()):.2f}")
+    metric_3.metric("EV medio", f"{float(pending.get('ev', pd.Series(dtype=float)).mean()):.2%}")
+
+    visible_columns = [
+        "placed_at",
+        "bet_type",
+        "partido",
+        "market_key",
+        "selection",
+        "line",
+        "my_odd",
+        "model_probability",
+        "ev",
+        "stake",
+        "notes",
+    ]
+    st.dataframe(
+        pending[[column for column in visible_columns if column in pending.columns]],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "placed_at": st.column_config.DatetimeColumn("Fecha pick", format="YYYY-MM-DD HH:mm"),
+            "bet_type": "Tipo",
+            "partido": "Partido",
+            "market_key": "Mercado",
+            "selection": "Seleccion",
+            "line": st.column_config.NumberColumn("Linea", format="%.1f"),
+            "my_odd": st.column_config.NumberColumn("Cuota tomada", format="%.2f"),
+            "model_probability": st.column_config.NumberColumn("Prob modelo", format="%.2f"),
+            "ev": st.column_config.NumberColumn("EV", format="%.2f"),
+            "stake": st.column_config.NumberColumn("Stake", format="%.2f"),
+            "notes": "Notas",
+        },
+    )
+
+    manual_sources = {"streamlit_manual_pick", "streamlit_manual_match_text"}
+    st.subheader("Captura CLV")
+    for _, row in pending.iterrows():
+        line_label = "-" if pd.isna(row.get("line")) else f"{float(row.get('line')):g}"
+        label = (
+            f"{row.get('partido', '-')} | {row.get('market_key', '-')} "
+            f"{row.get('selection', '-')} {line_label} | cuota {float(row.get('my_odd')):.2f}"
+        )
+        with st.container(border=True):
+            source = str(row.get("source") or "")
+            col_info, col_action = st.columns([4, 2])
+            col_info.write(label)
+            col_info.caption(f"ID: {row.get('id')} | source: {row.get('source')} | tipo: {row.get('bet_type')}")
+            if source in manual_sources:
+                manual_odd = col_action.number_input(
+                    "Cuota cierre",
+                    min_value=1.01,
+                    value=float(row.get("my_odd") or 1.50),
+                    step=0.01,
+                    format="%.2f",
+                    key=f"manual_clv_odd_{row.get('id')}",
+                )
+                manual_source = col_action.text_input(
+                    "Fuente",
+                    value="manual",
+                    key=f"manual_clv_source_{row.get('id')}",
+                )
+                if col_action.button("Guardar CLV manual", key=f"save_manual_clv_{row.get('id')}", use_container_width=True):
+                    try:
+                        result = record_manual_clv_for_bet(
+                            str(row["id"]),
+                            closing_odd=float(manual_odd),
+                            clv_source=manual_source.strip() or "manual",
+                            notes="CLV introducido manualmente desde Tracker CLV.",
+                        )
+                        load_tennis_bets_log.clear()
+                        st.success(
+                            f"CLV manual guardado: {result['clv_pinnacle_odd']:.2f} | "
+                            f"CLV value {result['clv_value']:.2%}"
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"No pude guardar CLV manual: {exc}")
+            else:
+                if col_action.button("Capturar CLV Pinnacle", key=f"capture_clv_{row.get('id')}", use_container_width=True):
+                    try:
+                        result = capture_pinnacle_clv_for_bet(str(row["id"]))
+                        load_tennis_bets_log.clear()
+                        st.success(
+                            f"CLV capturado: Pinnacle {result['clv_pinnacle_odd']:.2f} | "
+                            f"CLV value {result['clv_value']:.2%}"
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"No pude capturar CLV: {exc}")
+
+
 def render_tennis_bets_log() -> None:
     if st.button("Refrescar Apuestas", use_container_width=False):
         load_tennis_bets_log.clear()
@@ -997,6 +1511,9 @@ def render_tennis_bets_log() -> None:
         "ev",
         "stake",
         "kelly_fraction",
+        "clv_pinnacle_odd",
+        "clv_value",
+        "clv_captured_at",
         "pnl",
         "settled_at",
         "notes",
@@ -1020,6 +1537,9 @@ def render_tennis_bets_log() -> None:
             "ev": st.column_config.NumberColumn("EV", format="%.2f"),
             "stake": st.column_config.NumberColumn("Stake", format="%.2f"),
             "kelly_fraction": st.column_config.NumberColumn("Kelly", format="%.2f"),
+            "clv_pinnacle_odd": st.column_config.NumberColumn("CLV Pinnacle", format="%.2f"),
+            "clv_value": st.column_config.NumberColumn("CLV value", format="%.2f"),
+            "clv_captured_at": st.column_config.DatetimeColumn("CLV capturado", format="YYYY-MM-DD HH:mm"),
             "pnl": st.column_config.NumberColumn("PnL", format="%.2f"),
             "settled_at": st.column_config.DatetimeColumn("Cierre", format="YYYY-MM-DD HH:mm"),
         },
@@ -1180,27 +1700,32 @@ def render_tennis_dashboard_legacy() -> None:
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
-def render_tennis_dashboard() -> None:
-    st.title("BetViero Tenis")
-    st.caption("Backend Quant: historico ATP, features sin leakage, Monte Carlo Markov y EV contra mercado.")
-    tab1, tab2 = st.tabs(["🎯 Cazador en Vivo", "🗄️ Historial de Picks (Supabase)"])
-    with tab1:
-        render_tennis_live_hunter()
-    with tab2:
-        render_tennis_picks_history()
-
 
 def render_tennis_dashboard() -> None:
     st.title("BetViero Tenis")
     st.caption("Backend Quant: historico ATP, features sin leakage, Monte Carlo Markov y EV contra mercado.")
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Cazador en Vivo", "Mercado", "Graficas de Cuotas", "Apuestas", "Historial de Picks"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+        [
+            "Cazador en Vivo",
+            "Cazador Manual",
+            "Mercado",
+            "Graficas de Cuotas",
+            "Tracker CLV",
+            "Apuestas",
+            "Historial de Picks",
+        ]
+    )
     with tab1:
         render_tennis_live_hunter()
     with tab2:
-        render_tennis_market_odds()
+        render_cazador_manual()
     with tab3:
-        render_tennis_odds_tracking()
+        render_tennis_market_odds()
     with tab4:
-        render_tennis_bets_log()
+        render_tennis_odds_tracking()
     with tab5:
+        render_tennis_clv_tracker()
+    with tab6:
+        render_tennis_bets_log()
+    with tab7:
         render_tennis_picks_history()
