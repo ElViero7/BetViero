@@ -177,11 +177,7 @@ def load_predictions_snapshot(config: DashboardConfig) -> pd.DataFrame:
 
 
 def normalize_name_key(text: str) -> str:
-    normalized = "".join(char for char in str(text).lower() if char.isalnum())
-    normalized = normalized.replace("redforce", "redforce")
-    normalized = normalized.replace("force", "")
-    normalized = normalized.replace("kia", "kia")
-    return normalized
+    return "".join(char for char in str(text).lower() if char.isalnum())
 
 
 def build_oracle_results_frame(raw_data_dir: Path) -> pd.DataFrame:
@@ -261,7 +257,7 @@ def build_oracle_results_frame(raw_data_dir: Path) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("match_date").reset_index(drop=True)
 
 
-def _build_settlement_index(results_frame: pd.DataFrame) -> dict[str, list[pd.Series]]:
+def _build_settlement_index(results_frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
     if results_frame.empty:
         return {}
 
@@ -273,37 +269,35 @@ def _build_settlement_index(results_frame: pd.DataFrame) -> dict[str, list[pd.Se
     )
     indexed_frame = indexed_frame.sort_values("match_date")
 
-    settlement_index: dict[str, list[pd.Series]] = {}
-    for _, row in indexed_frame.iterrows():
-        pair_key = row.get("pair_key")
-        if pd.isna(pair_key):
-            continue
-        settlement_index.setdefault(str(pair_key), []).append(row)
-    return settlement_index
+    indexed_frame = indexed_frame.loc[indexed_frame["pair_key"].notna()].copy()
+    indexed_frame["pair_key"] = indexed_frame["pair_key"].astype(str)
+    return {
+        pair_key: group.reset_index(drop=True)
+        for pair_key, group in indexed_frame.groupby("pair_key", sort=False)
+    }
 
 
 def _find_settlement_row(
     match_name: str,
     created_at: Any,
-    settlement_index: dict[str, list[pd.Series]],
+    settlement_index: dict[str, pd.DataFrame],
 ) -> pd.Series | None:
     team_parts = [part.strip() for part in str(match_name).split(" vs ")]
     if len(team_parts) != 2:
         return None
     pair_key = "||".join(sorted([normalize_name_key(team_parts[0]), normalize_name_key(team_parts[1])]))
-    candidates = settlement_index.get(pair_key, [])
-    if not candidates:
+    candidates = settlement_index.get(pair_key)
+    if candidates is None or candidates.empty:
         return None
 
     created_at_ts = pd.to_datetime(created_at, utc=True, errors="coerce")
     if pd.isna(created_at_ts):
-        return candidates[0]
+        return candidates.iloc[0]
 
-    for candidate in candidates:
-        match_date = candidate.get("match_date")
-        if pd.notna(match_date) and match_date >= created_at_ts:
-            return candidate
-    return None
+    candidates = candidates.loc[candidates["match_date"].ge(created_at_ts).fillna(False)]
+    if candidates.empty:
+        return None
+    return candidates.iloc[0]
 
 
 def settle_legacy_bets(frame: pd.DataFrame, results_frame: pd.DataFrame) -> pd.DataFrame:

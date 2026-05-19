@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import pickle
 from dataclasses import asdict, dataclass
@@ -35,6 +36,8 @@ from .firstblood import (
     normalize_binary,
     save_parquet_dataset,
 )
+
+logger = logging.getLogger(__name__)
 
 TRAINING_RULE_LABEL = "2025 all games + 2026 map1 only"
 KILLS_LINES = [21.5, 23.5, 25.5, 27.5, 29.5, 31.5, 33.5]
@@ -948,51 +951,71 @@ def train_multimarket_pipeline(
     config: MultiMarketTrainingConfig | None = None,
 ) -> dict[str, Any]:
     config = config or MultiMarketTrainingConfig()
+    logger.info("Iniciando entrenamiento multimarket desde %s", input_path)
     team_frame, matchup_frame = build_multimarket_training_dataset(
         input_path=input_path,
         config=config,
         team_rows_output_path=team_rows_output_path,
         matchup_output_path=matchup_output_path,
     )
-    market_models = {
-        "winner": {
+    logger.info("Dataset multimarket listo. Team rows: %d. Matchup rows: %d", len(team_frame), len(matchup_frame))
+
+    market_models: dict[str, dict[str, Any]] = {}
+    classification_markets = [
+        ("winner", "target_blue_winner", "winner"),
+        ("firstblood", "target_blue_firstblood", "firstblood"),
+        ("firsttower", "target_blue_firsttower", "firsttower"),
+    ]
+    for market_name, target_column, feature_market in classification_markets:
+        logger.info("Entrenando mercado: %s", market_name)
+        trained_market = train_binary_market_model(matchup_frame, target_column, feature_market, config)
+        market_models[market_name] = {
             "market_type": "classification",
-            "target_column": "target_blue_winner",
-            **train_binary_market_model(matchup_frame, "target_blue_winner", "winner", config),
-        },
-        "firstblood": {
-            "market_type": "classification",
-            "target_column": "target_blue_firstblood",
-            **train_binary_market_model(
-                matchup_frame,
-                "target_blue_firstblood",
-                "firstblood",
-                config,
-            ),
-        },
-        "firsttower": {
-            "market_type": "classification",
-            "target_column": "target_blue_firsttower",
-            **train_binary_market_model(
-                matchup_frame,
-                "target_blue_firsttower",
-                "firsttower",
-                config,
-            ),
-        },
-        "kills": {
-            "market_type": "regression",
-            "target_column": "target_total_kills",
-            **train_regression_market_model(matchup_frame, "target_total_kills", "kills", config),
-        },
+            "target_column": target_column,
+            **trained_market,
+        }
+        metrics = trained_market["metrics"]
+        logger.info(
+            "Mercado %s completado. AUC: %s. Log loss: %s. Modelo: %s",
+            market_name,
+            metrics.get("roc_auc"),
+            metrics.get("log_loss"),
+            metrics.get("selected_model_name"),
+        )
+
+    logger.info("Entrenando mercado: kills")
+    kills_market = train_regression_market_model(matchup_frame, "target_total_kills", "kills", config)
+    market_models["kills"] = {
+        "market_type": "regression",
+        "target_column": "target_total_kills",
+        **kills_market,
     }
+    kills_metrics = kills_market["metrics"]
+    logger.info(
+        "Mercado kills completado. MAE: %s. RMSE: %s. Modelo: %s",
+        kills_metrics.get("mae"),
+        kills_metrics.get("rmse"),
+        kills_metrics.get("selected_model_name"),
+    )
+
     for line in KILLS_LINES:
         target_col = f"target_over_{str(line).replace('.', '_')}"
-        market_models[f"kills_over_{str(line).replace('.', '_')}"] = {
+        market_name = f"kills_over_{str(line).replace('.', '_')}"
+        logger.info("Entrenando mercado: %s", market_name)
+        trained_market = train_binary_market_model(matchup_frame, target_col, "kills", config)
+        market_models[market_name] = {
             "market_type": "classification",
             "target_column": target_col,
-            **train_binary_market_model(matchup_frame, target_col, "kills", config),
+            **trained_market,
         }
+        metrics = trained_market["metrics"]
+        logger.info(
+            "Mercado %s completado. AUC: %s. Log loss: %s. Modelo: %s",
+            market_name,
+            metrics.get("roc_auc"),
+            metrics.get("log_loss"),
+            metrics.get("selected_model_name"),
+        )
 
     save_multimarket_artifact(
         market_models=market_models,

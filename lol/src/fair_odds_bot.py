@@ -1246,11 +1246,44 @@ def insert_pick_to_supabase(config: BotConfig, payload: dict[str, Any]) -> None:
         "Content-Type": "application/json",
         "Accept-Profile": config.supabase_schema,
         "Content-Profile": config.supabase_schema,
-        "Prefer": "return=minimal",
+        "Prefer": "return=representation",
     }
     sanitized_payload = sanitize_for_json(payload)
     response = requests.post(url, headers=headers, json=sanitized_payload, timeout=30)
     if response.status_code >= 400:
         raise LoLPipelineError(
             f"Supabase insert failed ({response.status_code}): {response.text}"
+        )
+    inserted_rows = response.json()
+    if not inserted_rows:
+        raise LoLPipelineError("Supabase insert did not return the inserted pick.")
+
+    pick_id = inserted_rows[0].get("id")
+    if not pick_id:
+        raise LoLPipelineError("Supabase insert did not return a pick id.")
+
+    history_payload = sanitize_for_json(
+        {
+            "pick_id": pick_id,
+            "my_odd": sanitized_payload.get("my_odd"),
+            "fair_odd": sanitized_payload.get("model_fair_odd"),
+            "ev": sanitized_payload.get("ev"),
+        }
+    )
+    history_url = f"{config.supabase_url}/rest/v1/picks_odds_history"
+    history_response = requests.post(
+        history_url,
+        headers={**headers, "Prefer": "return=minimal"},
+        json=history_payload,
+        timeout=30,
+    )
+    if history_response.status_code >= 400:
+        logger.error(
+            "Supabase pick odds history insert failed for pick %s (%s): %s",
+            pick_id,
+            history_response.status_code,
+            history_response.text,
+        )
+        raise LoLPipelineError(
+            f"Supabase odds history insert failed ({history_response.status_code}): {history_response.text}"
         )
