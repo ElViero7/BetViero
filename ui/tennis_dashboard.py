@@ -68,6 +68,7 @@ TENNIS_SECRET_KEYS = [
     "TENNIS_ODDS_MARKETS",
     "TENNIS_ODDS_FORMAT",
 ]
+TENNIS_REFERENCE_BOOKMAKERS = {"pinnacle"}
 
 
 def get_streamlit_secret(key: str) -> str | None:
@@ -112,6 +113,8 @@ def load_tennis_csv(path_text: str) -> pd.DataFrame:
 
 def style_tennis_value_rows(row: pd.Series) -> list[str]:
     ev_value = pd.to_numeric(row.get("EV Actual", row.get("EV", 0)), errors="coerce")
+    if pd.isna(ev_value):
+        ev_value = pd.to_numeric(row.get("EV", 0), errors="coerce")
     if pd.notna(ev_value) and float(ev_value) > 0:
         return ["background-color: #d8f5df; color: #102a18;" for _ in row]
     return ["" for _ in row]
@@ -125,6 +128,69 @@ def add_tennis_kelly_column(frame: pd.DataFrame, bankroll: float = 1000.0) -> pd
     odds_values = pd.to_numeric(output["cuota_casa"], errors="coerce")
     denominator = odds_values - 1
     output["Kelly Recomendado"] = (bankroll * ev_values / denominator).where(denominator > 0)
+    return output
+
+
+def choose_tennis_reference_odd(row: pd.Series) -> float | None:
+    for column in ("mejor_cuota_actual", "cuota_casa"):
+        value = pd.to_numeric(row.get(column), errors="coerce")
+        if pd.notna(value):
+            return float(value)
+    return None
+
+
+def choose_tennis_reference_bookmaker(row: pd.Series) -> str:
+    for column in ("mejor_casa_actual", "casa_apuestas", "mejor_bookmaker_key_actual"):
+        value = row.get(column)
+        if pd.isna(value):
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return "-"
+
+
+def fill_tennis_reference_ev_columns(frame: pd.DataFrame, bankroll: float = 1000.0) -> pd.DataFrame:
+    if frame.empty or not {"nuestra_prob", "cuota_casa"}.issubset(frame.columns):
+        return frame
+
+    output = frame.copy()
+    probability = pd.to_numeric(output["nuestra_prob"], errors="coerce")
+    pinnacle_odd = pd.to_numeric(output["cuota_casa"], errors="coerce")
+    if "mejor_cuota_actual" in output.columns:
+        current_odd = pd.to_numeric(output["mejor_cuota_actual"], errors="coerce")
+    else:
+        current_odd = pd.Series(pd.NA, index=output.index, dtype="Float64")
+    reference_odd = current_odd.fillna(pinnacle_odd)
+    output["mejor_cuota_actual"] = current_odd.fillna(pinnacle_odd)
+
+    if "mejor_casa_actual" not in output.columns:
+        output["mejor_casa_actual"] = output.get("casa_apuestas")
+    else:
+        output["mejor_casa_actual"] = output["mejor_casa_actual"].where(
+            output["mejor_casa_actual"].notna(),
+            output.get("casa_apuestas"),
+        )
+
+    if "delta_cuota_actual" not in output.columns:
+        output["delta_cuota_actual"] = reference_odd - pinnacle_odd
+    else:
+        output["delta_cuota_actual"] = pd.to_numeric(output["delta_cuota_actual"], errors="coerce").fillna(
+            reference_odd - pinnacle_odd
+        )
+
+    reference_ev = probability * reference_odd - 1.0
+    if "EV Actual" in output.columns:
+        output["EV Actual"] = pd.to_numeric(output["EV Actual"], errors="coerce").fillna(reference_ev)
+    else:
+        output["EV Actual"] = reference_ev
+
+    denominator = reference_odd - 1.0
+    reference_kelly = (bankroll * output["EV Actual"] / denominator).where(denominator > 0)
+    if "Kelly Actual" in output.columns:
+        output["Kelly Actual"] = pd.to_numeric(output["Kelly Actual"], errors="coerce").fillna(reference_kelly)
+    else:
+        output["Kelly Actual"] = reference_kelly
     return output
 
 
@@ -217,6 +283,11 @@ def load_tennis_upcoming_odds() -> pd.DataFrame:
     frame = pd.DataFrame(response.data or [])
     if frame.empty:
         return frame
+    if "bookmaker_key" in frame.columns:
+        bookmaker_keys = frame["bookmaker_key"].fillna("").astype(str).str.lower()
+        frame = frame.loc[bookmaker_keys.isin(TENNIS_REFERENCE_BOOKMAKERS)].copy()
+        if frame.empty:
+            return frame
 
     for column in ["price", "implied_probability", "line"]:
         if column in frame.columns:
@@ -338,13 +409,13 @@ def enrich_tennis_value_bets_with_market(value_bets: pd.DataFrame, bankroll: flo
     try:
         market_odds = load_tennis_upcoming_odds()
     except Exception:
-        return output
+        return fill_tennis_reference_ev_columns(output, bankroll)
     if market_odds.empty:
-        return output
+        return fill_tennis_reference_ev_columns(output, bankroll)
 
     best_odds = build_tennis_best_market_odds(market_odds)
     if best_odds.empty:
-        return output
+        return fill_tennis_reference_ev_columns(output, bankroll)
 
     join_columns_left = ["partido", "market_key_actual", "selection_actual", "linea"]
     join_columns_right = ["match_label", "market_key", "selection", "line"]
@@ -382,11 +453,7 @@ def enrich_tennis_value_bets_with_market(value_bets: pd.DataFrame, bankroll: flo
         right_on=join_columns_right,
         how="left",
     )
-    output["delta_cuota_actual"] = output["mejor_cuota_actual"] - pd.to_numeric(output.get("cuota_casa"), errors="coerce")
-    output["EV Actual"] = output["nuestra_prob"] * output["mejor_cuota_actual"] - 1.0
-    denominator = output["mejor_cuota_actual"] - 1.0
-    output["Kelly Actual"] = (bankroll * output["EV Actual"] / denominator).where(denominator > 0)
-    return output
+    return fill_tennis_reference_ev_columns(output, bankroll)
 
 
 def split_tennis_match_name(match_name: object) -> tuple[str, str]:
@@ -1067,7 +1134,9 @@ def render_tennis_bet_registration(value_bets: pd.DataFrame) -> None:
 
     candidate_bets = value_bets.copy()
     if "EV Actual" in candidate_bets.columns:
-        candidate_bets["ev_para_registro"] = pd.to_numeric(candidate_bets["EV Actual"], errors="coerce")
+        candidate_bets["ev_para_registro"] = pd.to_numeric(candidate_bets["EV Actual"], errors="coerce").fillna(
+            pd.to_numeric(candidate_bets.get("EV"), errors="coerce")
+        )
     else:
         candidate_bets["ev_para_registro"] = pd.to_numeric(candidate_bets.get("EV"), errors="coerce")
     candidate_bets = candidate_bets.loc[candidate_bets["ev_para_registro"].fillna(-1) > 0].copy()
@@ -1079,23 +1148,23 @@ def render_tennis_bet_registration(value_bets: pd.DataFrame) -> None:
     candidate_bets["registro_label"] = candidate_bets.apply(
         lambda row: (
             f"{int(row.name) + 1}. {row.get('partido', '-')} | {row.get('mercado', '-')} "
-            f"{row.get('linea', '-')} | cuota {row.get('mejor_cuota_actual', row.get('cuota_casa', '-'))}"
+            f"{row.get('linea', '-')} | cuota {choose_tennis_reference_odd(row) or '-'}"
         ),
         axis=1,
     )
     selected_label = st.selectbox("Value bet", candidate_bets["registro_label"].tolist())
     selected_row = candidate_bets.loc[candidate_bets["registro_label"].eq(selected_label)].iloc[0]
 
-    default_odd = selected_row.get("mejor_cuota_actual")
-    if pd.isna(default_odd):
-        default_odd = selected_row.get("cuota_casa")
-    default_odd = float(default_odd)
+    default_odd = choose_tennis_reference_odd(selected_row)
+    if default_odd is None:
+        st.info("No hay cuota valida para registrar este pick.")
+        return
     probability = float(selected_row.get("nuestra_prob"))
 
     col_1, col_2, col_3, col_4 = st.columns(4)
     col_1.metric("Prob modelo", f"{probability:.2%}")
     col_2.metric("Cuota por defecto", f"{default_odd:.2f}")
-    col_3.metric("Casa", str(selected_row.get("mejor_casa_actual") or selected_row.get("casa_apuestas") or "-"))
+    col_3.metric("Casa", choose_tennis_reference_bookmaker(selected_row))
     col_4.metric("EV actual", f"{(probability * default_odd - 1.0):.2%}")
 
     with st.form("tennis_bet_registration_form", clear_on_submit=False):

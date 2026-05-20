@@ -249,6 +249,16 @@ def _parse_tennis_value_market(mercado: object) -> tuple[str | None, str | None]
     return None, None
 
 
+def _first_non_empty_text(*values: object) -> str:
+    for value in values:
+        if pd.isna(value):
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
 def settle_tennis_bet(bet_id: str, status: str, result_selection: str | None = None) -> None:
     bets = _load_tennis_bets_log()
     if bets.empty:
@@ -329,6 +339,11 @@ def insert_tennis_bet_log(
     market_key, selection = _parse_tennis_value_market(row.get("mercado"))
     probability = float(row.get("nuestra_prob"))
     ev = probability * odd - 1.0
+    bookmaker_key = _first_non_empty_text(
+        row.get("mejor_bookmaker_key_actual"),
+        row.get("mejor_casa_actual"),
+        row.get("casa_apuestas"),
+    )
     payload = {
         "tennis_pick_id": None if pd.isna(row.get("tennis_pick_id")) else str(row.get("tennis_pick_id")),
         "source": source,
@@ -338,7 +353,7 @@ def insert_tennis_bet_log(
         "market_key": market_key or str(row.get("mercado") or ""),
         "selection": selection or str(row.get("mercado") or ""),
         "line": None if pd.isna(row.get("linea")) else float(row.get("linea")),
-        "bookmaker_key": str(row.get("mejor_bookmaker_key_actual") or row.get("mejor_casa_actual") or row.get("casa_apuestas") or ""),
+        "bookmaker_key": bookmaker_key,
         "my_odd": float(odd),
         "model_probability": probability,
         "model_fair_odd": 1.0 / probability if probability > 0 else None,
