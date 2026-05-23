@@ -2,6 +2,8 @@ name: Tennis Odds Auto-Tracker
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *'
 
 jobs:
   track_odds:
@@ -23,6 +25,8 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run Tennis Odds Listener
+        id: odds_listener
+        continue-on-error: true
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY || secrets.ODDS_API_KEY }}
@@ -32,6 +36,7 @@ jobs:
         run: python tennis/src/odds_listener.py
 
       - name: Run Tennis EV Calculator
+        id: ev_calculator
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY || secrets.ODDS_API_KEY }}
@@ -39,3 +44,9 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_KEY }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python tennis/src/ev_calculator.py
+
+      - name: Report tracker step results
+        if: always()
+        run: |
+          echo "Odds listener result: ${{ steps.odds_listener.outcome }}"
+          echo "EV calculator result: ${{ steps.ev_calculator.outcome }}"

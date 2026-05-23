@@ -112,6 +112,18 @@ def load_tennis_csv(path_text: str) -> pd.DataFrame:
 
 
 def style_tennis_value_rows(row: pd.Series) -> list[str]:
+    revisar = row.get("revisar_manualmente")
+    if pd.notna(revisar):
+        if isinstance(revisar, str):
+            revisar_bool = revisar.lower() in ("true", "1", "yes")
+        else:
+            revisar_bool = bool(revisar)
+    else:
+        revisar_bool = False
+
+    if revisar_bool:
+        return ["background-color: #fff3cd; color: #856404;" for _ in row]
+
     ev_value = pd.to_numeric(row.get("EV Actual", row.get("EV", 0)), errors="coerce")
     if pd.isna(ev_value):
         ev_value = pd.to_numeric(row.get("EV", 0), errors="coerce")
@@ -433,6 +445,9 @@ def enrich_tennis_value_bets_with_market(value_bets: pd.DataFrame, bankroll: flo
             "max_cuota",
             "rango_cuotas",
             "ultima_actualizacion",
+            "commence_time",
+            "id",
+            "external_event_id",
         ]
     ].rename(
         columns={
@@ -444,6 +459,8 @@ def enrich_tennis_value_bets_with_market(value_bets: pd.DataFrame, bankroll: flo
             "max_cuota": "max_cuota_actual",
             "rango_cuotas": "rango_cuotas_actual",
             "ultima_actualizacion": "ultima_actualizacion_cuota",
+            "id": "upcoming_odds_id",
+            "external_event_id": "clv_source_event_id",
         }
     )
 
@@ -851,6 +868,7 @@ def render_tennis_live_hunter() -> None:
             value_bets[column] = pd.to_numeric(value_bets[column], errors="coerce")
     preferred_columns = [
         "partido",
+        "revisar_manualmente",
         "mercado",
         "linea",
         "casa_apuestas",
@@ -1167,12 +1185,12 @@ def render_tennis_bet_registration(value_bets: pd.DataFrame) -> None:
     col_3.metric("Casa", choose_tennis_reference_bookmaker(selected_row))
     col_4.metric("EV actual", f"{(probability * default_odd - 1.0):.2%}")
 
-    with st.form("tennis_bet_registration_form", clear_on_submit=False):
+    with st.container(border=True):
         form_col_1, form_col_2, form_col_3, form_col_4 = st.columns(4)
-        bet_type = form_col_1.selectbox("Tipo", ["real", "paper"])
-        bankroll = form_col_2.number_input("Bankroll", min_value=0.0, value=1000.0, step=50.0)
-        kelly_multiplier = form_col_3.selectbox("Kelly", [0.25, 0.5, 1.0], format_func=lambda value: f"{value:g}x")
-        manual_odd = form_col_4.number_input("Cuota", min_value=1.01, value=default_odd, step=0.01, format="%.2f")
+        bet_type = form_col_1.selectbox("Tipo", ["real", "paper"], key="reg_bet_type")
+        bankroll = form_col_2.number_input("Bankroll", min_value=0.0, value=1000.0, step=50.0, key="reg_bankroll")
+        kelly_multiplier = form_col_3.selectbox("Kelly", [0.25, 0.5, 1.0], format_func=lambda value: f"{value:g}x", key="reg_kelly_mult")
+        manual_odd = form_col_4.number_input("Cuota", min_value=1.01, value=default_odd, step=0.01, format="%.2f", key="reg_manual_odd")
 
         ev, applied_kelly_fraction, recommended_stake = calculate_tennis_kelly_values(
             probability,
@@ -1180,19 +1198,19 @@ def render_tennis_bet_registration(value_bets: pd.DataFrame) -> None:
             bankroll,
             kelly_multiplier,
         )
-        use_recommended_stake = st.checkbox("Usar stake Kelly recomendado", value=True)
+        use_recommended_stake = st.checkbox("Usar stake Kelly recomendado", value=True, key="reg_use_rec_stake")
         if use_recommended_stake:
             stake = float(round(recommended_stake, 2))
             st.metric("Stake a registrar", f"{stake:.2f}")
         else:
-            stake = st.number_input("Stake manual", min_value=0.0, value=float(round(recommended_stake, 2)), step=1.0, format="%.2f")
-        notes = st.text_area("Notas", value="")
+            stake = st.number_input("Stake manual", min_value=0.0, value=float(round(recommended_stake, 2)), step=1.0, format="%.2f", key="reg_manual_stake")
+        notes = st.text_area("Notas", value="", key="reg_notes")
 
         calc_col_1, calc_col_2, calc_col_3 = st.columns(3)
         calc_col_1.metric("EV con tu cuota", f"{ev:.2%}")
         calc_col_2.metric("Kelly aplicado", f"{applied_kelly_fraction:.2%}")
         calc_col_3.metric("Stake recomendado", f"{recommended_stake:.2f}")
-        submitted = st.form_submit_button("Registrar en bets_log", use_container_width=True)
+        submitted = st.button("Registrar en bets_log", use_container_width=True, key="reg_submit_btn")
 
     if submitted:
         try:
@@ -1556,8 +1574,43 @@ def render_tennis_bets_log() -> None:
     type_options = ["Todos"] + bets["bet_type"].dropna().drop_duplicates().sort_values().tolist()
     status_options = ["Todos"] + bets["status"].dropna().drop_duplicates().sort_values().tolist()
     col_type, col_status = st.columns(2)
-    selected_type = col_type.selectbox("Tipo", type_options)
-    selected_status = col_status.selectbox("Estado", status_options)
+    selected_type = col_type.selectbox("Tipo", type_options, key="bets_log_type_filter")
+    selected_status = col_status.selectbox("Estado", status_options, key="bets_log_status_filter")
+
+    # Filtros de rango de fechas
+    col_date_placed, col_date_event = st.columns(2)
+    
+    # Filtro por fecha de registro
+    min_placed = bets["placed_at"].min()
+    max_placed = bets["placed_at"].max()
+    if pd.isna(min_placed):
+        min_placed_date = None
+        max_placed_date = None
+    else:
+        min_placed_date = min_placed.date()
+        max_placed_date = max_placed.date()
+
+    placed_range = col_date_placed.date_input(
+        "Rango de registro de apuesta (placed_at)",
+        value=(min_placed_date, max_placed_date) if min_placed_date else [],
+        key="bets_log_placed_date_range"
+    )
+
+    # Filtro por fecha de partido
+    min_event = bets["event_time"].min()
+    max_event = bets["event_time"].max()
+    if pd.isna(min_event):
+        min_event_date = None
+        max_event_date = None
+    else:
+        min_event_date = min_event.date()
+        max_event_date = max_event.date()
+
+    event_range = col_date_event.date_input(
+        "Rango de inicio del partido (event_time)",
+        value=(min_event_date, max_event_date) if min_event_date else [],
+        key="bets_log_event_date_range"
+    )
 
     filtered = bets.copy()
     if selected_type != "Todos":
@@ -1565,11 +1618,49 @@ def render_tennis_bets_log() -> None:
     if selected_status != "Todos":
         filtered = filtered.loc[filtered["status"].eq(selected_status)]
 
+    # Aplicar filtro de fecha de registro (placed_at)
+    if isinstance(placed_range, (tuple, list)) and len(placed_range) == 2:
+        start_date, end_date = placed_range
+        filtered = filtered.loc[
+            (filtered["placed_at"].dt.date >= start_date) & 
+            (filtered["placed_at"].dt.date <= end_date)
+        ]
+    elif isinstance(placed_range, (tuple, list)) and len(placed_range) == 1:
+        start_date = placed_range[0]
+        filtered = filtered.loc[filtered["placed_at"].dt.date == start_date]
+    elif hasattr(placed_range, "year"):
+        filtered = filtered.loc[filtered["placed_at"].dt.date == placed_range]
+
+    # Aplicar filtro de fecha del partido (event_time)
+    if isinstance(event_range, (tuple, list)) and len(event_range) == 2:
+        start_date, end_date = event_range
+        event_dates = filtered["event_time"].dt.date
+        filtered = filtered.loc[
+            event_dates.notna() &
+            (event_dates >= start_date) & 
+            (event_dates <= end_date)
+        ]
+    elif isinstance(event_range, (tuple, list)) and len(event_range) == 1:
+        start_date = event_range[0]
+        event_dates = filtered["event_time"].dt.date
+        filtered = filtered.loc[
+            event_dates.notna() &
+            (event_dates == start_date)
+        ]
+    elif hasattr(event_range, "year"):
+        event_dates = filtered["event_time"].dt.date
+        filtered = filtered.loc[
+            event_dates.notna() &
+            (event_dates == event_range)
+        ]
+
     visible_columns = [
         "placed_at",
+        "event_time",
         "tennis_pick_id",
         "bet_type",
         "status",
+        "revisar_manualmente",
         "partido",
         "market_key",
         "selection",
@@ -1592,10 +1683,12 @@ def render_tennis_bets_log() -> None:
         use_container_width=True,
         hide_index=True,
         column_config={
-            "placed_at": st.column_config.DatetimeColumn("Fecha", format="YYYY-MM-DD HH:mm"),
+            "placed_at": st.column_config.DatetimeColumn("Fecha Registro", format="YYYY-MM-DD HH:mm"),
+            "event_time": st.column_config.DatetimeColumn("Fecha Partido", format="YYYY-MM-DD HH:mm"),
             "tennis_pick_id": "Pick ID",
             "bet_type": "Tipo",
             "status": "Estado",
+            "revisar_manualmente": "Dudosa/Revisar",
             "partido": "Partido",
             "market_key": "Mercado",
             "selection": "Seleccion",
@@ -1768,12 +1861,106 @@ def render_tennis_dashboard_legacy() -> None:
     )
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
+def render_tennis_backtest() -> None:
+    st.subheader("Backtest Histórico Interactivo")
+    st.markdown(
+        """
+        Esta sección permite evaluar la rentabilidad del modelo utilizando el histórico de datos de Sackmann (2022-2026).
+        El simulador aplica **aleatorización de roles (50/50)** para asegurar que no haya filtración de datos (*data leakage*).
+        """
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        min_ev = st.slider("EV Mínimo (%)", min_value=0.0, max_value=10.0, value=2.0, step=0.5) / 100.0
+        max_ev = st.slider("EV Máximo (Capping) (%)", min_value=10.0, max_value=50.0, value=30.0, step=1.0) / 100.0
+    with col2:
+        n_sims = st.selectbox("Simulaciones Monte Carlo", options=[1000, 5000, 10000], index=0)
+        
+        # Obtener los años disponibles dinámicamente
+        years = ["Todos los años"]
+        if TENNIS_FEATURES_PATH.exists():
+            try:
+                df_temp = pd.read_csv(TENNIS_FEATURES_PATH, usecols=["fecha"])
+                df_temp["fecha"] = pd.to_datetime(df_temp["fecha"])
+                unique_years = sorted(df_temp["fecha"].dt.year.dropna().unique().tolist(), reverse=True)
+                years.extend([int(y) for y in unique_years])
+            except Exception:
+                years.extend([2026, 2025, 2024, 2023, 2022, 2021])
+        else:
+            years.extend([2026, 2025, 2024, 2023, 2022, 2021])
+        
+        selected_year = st.selectbox("Año a evaluar", options=years)
+
+    run_btn = st.button("Ejecutar Backtest Histórico", use_container_width=True, type="primary")
+
+    if run_btn:
+        try:
+            from tennis.src.backtest import run_backtest, RAW_DIR
+        except ModuleNotFoundError:
+            from tennis.backtest import run_backtest, RAW_DIR
+        
+        target_year = None if selected_year == "Todos los años" else int(selected_year)
+        
+        with st.spinner("Ejecutando backtest con Monte Carlo..."):
+            metrics = run_backtest(
+                features_path=TENNIS_FEATURES_PATH,
+                raw_dir=RAW_DIR,
+                min_ev=min_ev,
+                max_ev=max_ev,
+                n_sims=n_sims,
+                target_year=target_year,
+            )
+        
+        if metrics:
+            st.success("¡Backtest completado con éxito!")
+            
+            # Tarjetas de métricas globales
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Retorno (ROI)", f"{metrics['roi']:.2%}")
+            m2.metric("PnL Total", f"{metrics['total_pnl']:+.2f} ud")
+            m3.metric("Acierto (Win Rate)", f"{metrics['win_rate']:.2%}")
+            m4.metric("Apuestas Realizadas", f"{metrics['total_bets_placed']:,}")
+            
+            st.write(f"Partidos evaluados totales: `{metrics['total_matches_evaluated']:,}`")
+            
+            # Tabla de desglose por año
+            bets_by_year = metrics.get("bets_by_year", {})
+            if bets_by_year:
+                st.subheader("Desglose Anual")
+                rows = []
+                for yr in sorted(bets_by_year.keys()):
+                    stats = bets_by_year[yr]
+                    y_wr = stats["wins"] / stats["bets"] if stats["bets"] > 0 else 0.0
+                    y_roi = stats["pnl"] / stats["bets"] if stats["bets"] > 0 else 0.0
+                    rows.append({
+                        "Año": int(yr),
+                        "Apuestas": int(stats["bets"]),
+                        "Aciertos": int(stats["wins"]),
+                        "Win Rate": y_wr,
+                        "PnL (ud)": stats["pnl"],
+                        "ROI": y_roi
+                    })
+                df_year = pd.DataFrame(rows)
+                
+                styled_df = df_year.style.format({
+                    "Año": "{:d}",
+                    "Apuestas": "{:,d}",
+                    "Aciertos": "{:,d}",
+                    "Win Rate": "{:.2%}",
+                    "PnL (ud)": "{:+.2f}",
+                    "ROI": "{:+.2%}"
+                })
+                st.dataframe(styled_df, use_container_width=True, hide_index=True)
+        else:
+            st.error("No se generaron resultados para los parámetros seleccionados o falta el archivo de características.")
+
 
 
 def render_tennis_dashboard() -> None:
     st.title("BetViero Tenis")
     st.caption("Backend Quant: historico ATP, features sin leakage, Monte Carlo Markov y EV contra mercado.")
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
         [
             "Cazador en Vivo",
             "Cazador Manual",
@@ -1782,6 +1969,7 @@ def render_tennis_dashboard() -> None:
             "Tracker CLV",
             "Apuestas",
             "Historial de Picks",
+            "Backtest",
         ]
     )
     with tab1:
@@ -1798,3 +1986,5 @@ def render_tennis_dashboard() -> None:
         render_tennis_bets_log()
     with tab7:
         render_tennis_picks_history()
+    with tab8:
+        render_tennis_backtest()

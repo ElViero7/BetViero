@@ -138,8 +138,16 @@ def add_no_leakage_player_features(player_rows: pd.DataFrame) -> pd.DataFrame:
     featured["return_points_won_pct_last20"] = grouped_by_player_surface["return_points_won_pct_match"].transform(
         lambda series: series.shift(1).rolling(ROLLING_WINDOW, min_periods=3).mean()
     )
-    featured["dias_desde_ultimo_partido"] = grouped_by_player["fecha"].diff().dt.days
-    featured["returning_from_injury"] = (featured["dias_desde_ultimo_partido"] > 45).astype(int)
+    featured["prev_fecha"] = grouped_by_player["fecha"].shift(1)
+    featured["dias_desde_ultimo_partido"] = (featured["fecha"] - featured["prev_fecha"]).dt.days
+    is_offseason = (
+        (featured["fecha"].dt.year > featured["prev_fecha"].dt.year) &
+        (featured["dias_desde_ultimo_partido"] <= 90)
+    )
+    featured["returning_from_injury"] = (
+        (featured["dias_desde_ultimo_partido"] > 45) & ~is_offseason
+    ).astype(int)
+    featured.drop(columns=["prev_fecha"], inplace=True)
     featured["minutos_acumulados_torneo"] = (
         featured.groupby(["player_id", "tourney_id"], group_keys=False)["minutes"]
         .transform(lambda series: series.shift(1).fillna(0).cumsum())
@@ -151,6 +159,7 @@ def merge_player_features(matches: pd.DataFrame, player_features: pd.DataFrame) 
     feature_columns = [
         "source_row_id",
         "is_winner",
+        "player_id",
         "serve_points_won_pct_last20",
         "return_points_won_pct_last20",
         "dias_desde_ultimo_partido",
@@ -162,6 +171,7 @@ def merge_player_features(matches: pd.DataFrame, player_features: pd.DataFrame) 
         .drop(columns=["is_winner"])
         .rename(
             columns={
+                "player_id": "jugador_a_id",
                 "serve_points_won_pct_last20": "jugador_a_serve_points_won_pct_last20",
                 "return_points_won_pct_last20": "jugador_a_return_points_won_pct_last20",
                 "dias_desde_ultimo_partido": "jugador_a_dias_desde_ultimo_partido",
@@ -175,6 +185,7 @@ def merge_player_features(matches: pd.DataFrame, player_features: pd.DataFrame) 
         .drop(columns=["is_winner"])
         .rename(
             columns={
+                "player_id": "jugador_b_id",
                 "serve_points_won_pct_last20": "jugador_b_serve_points_won_pct_last20",
                 "return_points_won_pct_last20": "jugador_b_return_points_won_pct_last20",
                 "dias_desde_ultimo_partido": "jugador_b_dias_desde_ultimo_partido",
@@ -201,6 +212,8 @@ def merge_player_features(matches: pd.DataFrame, player_features: pd.DataFrame) 
         "round",
         "jugador_a",
         "jugador_b",
+        "jugador_a_id",
+        "jugador_b_id",
         "total_juegos",
         "diferencia_juegos",
         "jugador_a_serve_points_won_pct_last20",

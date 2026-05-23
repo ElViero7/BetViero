@@ -44,6 +44,21 @@ def normalize_player_name(name: object) -> str:
     return re.sub(r"\s+", " ", text)
 
 
+def first_name_conflict(left_text: str, right_text: str) -> bool:
+    left_tokens = left_text.split()
+    right_tokens = right_text.split()
+    if len(left_tokens) < 2 or len(right_tokens) < 2:
+        return False
+    f1 = left_tokens[0]
+    f2 = right_tokens[0]
+    if f1[0] != f2[0]:
+        return True
+    if len(f1) > 1 and len(f2) > 1:
+        if f1 != f2 and not f1.startswith(f2) and not f2.startswith(f1):
+            return True
+    return False
+
+
 def player_name_score(left: object, right: object) -> float:
     left_text = normalize_player_name(left)
     right_text = normalize_player_name(right)
@@ -51,6 +66,8 @@ def player_name_score(left: object, right: object) -> float:
         return 0.0
     if left_text == right_text:
         return 1.0
+    if first_name_conflict(left_text, right_text):
+        return 0.0
 
     left_tokens = left_text.split()
     right_tokens = right_text.split()

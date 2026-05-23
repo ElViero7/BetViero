@@ -344,10 +344,32 @@ def insert_tennis_bet_log(
         row.get("mejor_casa_actual"),
         row.get("casa_apuestas"),
     )
+    revisar_manualmente = bool(row.get("revisar_manualmente", False))
+    event_time = row.get("commence_time") or row.get("event_time")
+    if pd.isna(event_time):
+        event_time = None
+    else:
+        event_time = str(event_time)
+
+    upcoming_odds_id = row.get("upcoming_odds_id")
+    if pd.isna(upcoming_odds_id):
+        upcoming_odds_id = None
+    else:
+        upcoming_odds_id = str(upcoming_odds_id)
+
+    clv_source_event_id = row.get("clv_source_event_id")
+    if pd.isna(clv_source_event_id):
+        clv_source_event_id = None
+    else:
+        clv_source_event_id = str(clv_source_event_id)
+
     payload = {
         "tennis_pick_id": None if pd.isna(row.get("tennis_pick_id")) else str(row.get("tennis_pick_id")),
+        "upcoming_odds_id": upcoming_odds_id,
+        "clv_source_event_id": clv_source_event_id,
         "source": source,
         "bet_type": bet_type,
+        "event_time": event_time,
         "player_1": player_1,
         "player_2": player_2,
         "market_key": market_key or str(row.get("mercado") or ""),
@@ -363,9 +385,11 @@ def insert_tennis_bet_log(
         "kelly_fraction": float(kelly_fraction),
         "status": "pending",
         "notes": notes.strip() or None,
+        "revisar_manualmente": revisar_manualmente,
         "raw_payload": {
             "source": source,
             "partido": row.get("partido"),
+            "event_time": event_time,
             "mercado": row.get("mercado"),
             "superficie": row.get("superficie"),
             "cuota_casa_csv": None if pd.isna(row.get("cuota_casa")) else float(row.get("cuota_casa")),
@@ -382,15 +406,31 @@ def insert_tennis_bet_log(
             "tennis_pick_fecha": None if pd.isna(row.get("tennis_pick_fecha")) else str(row.get("tennis_pick_fecha")),
             "ev_csv": None if pd.isna(row.get("EV")) else float(row.get("EV")),
             "ev_actual": None if pd.isna(row.get("EV Actual")) else float(row.get("EV Actual")),
+            "revisar_manualmente": revisar_manualmente,
         },
     }
-    (
-        get_supabase_client()
-        .schema("tennis")
-        .table("bets_log")
-        .insert(payload)
-        .execute()
-    )
+    try:
+        (
+            get_supabase_client()
+            .schema("tennis")
+            .table("bets_log")
+            .insert(payload)
+            .execute()
+        )
+    except Exception as exc:
+        if "revisar_manualmente" in str(exc):
+            print("[Supabase] Advertencia: la columna 'revisar_manualmente' no existe en tennis.bets_log. Reintentando...")
+            payload_fallback = payload.copy()
+            payload_fallback.pop("revisar_manualmente", None)
+            (
+                get_supabase_client()
+                .schema("tennis")
+                .table("bets_log")
+                .insert(payload_fallback)
+                .execute()
+            )
+        else:
+            raise
 
 
 def build_tennis_odds_tracking_frame() -> pd.DataFrame:
